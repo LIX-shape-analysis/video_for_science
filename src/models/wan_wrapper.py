@@ -766,14 +766,29 @@ class Wan22VideoModel(nn.Module):
         predicted_physics = self.decode_vae_latent_to_physics(predicted_latents_vae)
         
         # Physics reconstruction loss
-        physics_pred_loss = F.mse_loss(predicted_physics, target_frames)
+        # Note: VAE has temporal compression, so decoded frames may not match target count
+        # Compare only the frames we have
+        T_pred = predicted_physics.shape[1]
+        T_target = target_frames.shape[1]
+        T_compare = min(T_pred, T_target)
+        
+        if T_compare > 0:
+            physics_pred_loss = F.mse_loss(
+                predicted_physics[:, :T_compare],
+                target_frames[:, :T_compare]
+            )
+        else:
+            # Fallback: just compute loss on whatever we have
+            physics_pred_loss = torch.tensor(0.0, device=predicted_physics.device)
         
         # === Total Loss ===
+        # Note: temporal_pred_loss in latent space is the primary objective
+        # physics_pred_loss is auxiliary (and may be on fewer frames due to VAE compression)
         total_loss = (
             adapter_recon_loss * 1.0 +      # Channel adapter reconstruction
             spatial_recon_loss * 0.5 +       # Spatial adapter reconstruction
             temporal_pred_loss * 2.0 +       # Temporal prediction in latent space (main objective)
-            physics_pred_loss * 1.0          # Physics prediction loss
+            physics_pred_loss * 0.5          # Physics prediction loss (reduced weight due to frame mismatch)
         )
         
         return {
@@ -783,7 +798,7 @@ class Wan22VideoModel(nn.Module):
             "temporal_pred_loss": temporal_pred_loss,
             "physics_pred_loss": physics_pred_loss,
             "predicted_physics": predicted_physics,
-            "target_physics": target_frames,
+            "target_physics": target_frames[:, :T_compare] if T_compare > 0 else target_frames,
         }
     
     @torch.no_grad()
