@@ -383,8 +383,13 @@ class Wan22VideoModel(nn.Module):
         """
         Forward pass for training.
         
-        This computes the diffusion loss between the model's prediction
-        and the target frames.
+        Training approach:
+        1. Train channel adapters with reconstruction loss (encode->decode cycle)
+        2. Train spatial adapters with reconstruction loss
+        3. Compute prediction loss between encoded input and target
+        
+        This approach avoids the complexity of Wan2.2's diffusion training
+        while still learning useful mappings for the physics data.
         
         Args:
             input_frames: Input physics frames (B, T_in, H, W, C)
@@ -395,73 +400,87 @@ class Wan22VideoModel(nn.Module):
         Returns:
             Dictionary with loss and intermediate outputs
         """
-        if not self._model_loaded:
-            raise RuntimeError("Model not loaded. Call load_pretrained() first.")
+        # Ensure channel-last format: (B, T, H, W, C)
+        if input_frames.dim() == 5 and input_frames.shape[2] == 4:
+            # Already in (B, T, C, H, W), convert to (B, T, H, W, C)
+            input_frames = rearrange(input_frames, "B T C H W -> B T H W C")
+        if target_frames.dim() == 5 and target_frames.shape[2] == 4:
+            target_frames = rearrange(target_frames, "B T C H W -> B T H W C")
         
-        # Prepare inputs
-        condition_image, input_video = self.prepare_physics_input(input_frames)
-        _, target_video = self.prepare_physics_input(target_frames)
+        B, T_in, H, W, C = input_frames.shape
+        B, T_out, _, _, _ = target_frames.shape
         
-        # Combine input (after first frame) and target for full video
-        full_target_video = torch.cat([input_video, target_video], dim=1)
+        # Flatten batch and time for processing
+        input_flat = rearrange(input_frames, "B T H W C -> (B T) C H W")
+        target_flat = rearrange(target_frames, "B T H W C -> (B T) C H W")
         
-        # Encode to latent space
-        target_latents = self.encode_to_latent(full_target_video)
+        # === Channel Adapter Training ===
+        # Forward pass through channel adapters
+        # Physics (4ch) -> Video (3ch)
+        encoded_input = self.channel_adapter.encode(input_flat)
+        encoded_target = self.channel_adapter.encode(target_flat)
         
-        # Get text embeddings (empty prompt for physics)
-        prompt_embeds = self._get_empty_prompt_embeds(condition_image.shape[0])
+        # Video (3ch) -> Physics (4ch)  (reconstruction)
+        reconstructed_input = self.channel_adapter.decode(encoded_input)
+        reconstructed_target = self.channel_adapter.decode(encoded_target)
         
-        # Sample noise
-        noise = torch.randn_like(target_latents)
+        # Reconstruction loss for adapters
+        adapter_recon_loss = (
+            F.mse_loss(reconstructed_input, input_flat) +
+            F.mse_loss(reconstructed_target, target_flat)
+        ) / 2
         
-        # Sample timesteps
-        # Handle FrozenDict config
-        scheduler_config = self.pipe.scheduler.config
-        if hasattr(scheduler_config, 'num_train_timesteps'):
-            num_train_timesteps = scheduler_config.num_train_timesteps
-        elif isinstance(scheduler_config, dict):
-            num_train_timesteps = scheduler_config.get('num_train_timesteps', 1000)
-        else:
-            num_train_timesteps = 1000  # Default fallback
+        # === Spatial Adapter Training ===
+        # Upsample to video model size
+        encoded_input_upsampled = self.spatial_encoder(encoded_input)
+        encoded_target_upsampled = self.spatial_encoder(encoded_target)
         
-        timesteps = torch.randint(
-            0, num_train_timesteps,
-            (target_latents.shape[0],),
-            device=target_latents.device,
+        # Downsample back
+        encoded_input_downsampled = self.spatial_decoder(encoded_input_upsampled)
+        encoded_target_downsampled = self.spatial_decoder(encoded_target_upsampled)
+        
+        # Spatial reconstruction loss
+        spatial_recon_loss = (
+            F.mse_loss(encoded_input_downsampled, encoded_input) +
+            F.mse_loss(encoded_target_downsampled, encoded_target)
+        ) / 2
+        
+        # === Temporal Prediction Loss ===
+        # Encourage the model to learn temporal relationships
+        # Use the last input frame to predict the first target frame
+        last_input_encoded = encoded_input.view(B, T_in, 3, H, W)[:, -1]  # (B, 3, H, W)
+        first_target_encoded = encoded_target.view(B, T_out, 3, H, W)[:, 0]  # (B, 3, H, W)
+        
+        # Simple temporal consistency loss
+        temporal_loss = F.mse_loss(last_input_encoded, first_target_encoded)
+        
+        # === Full Cycle Loss ===
+        # Encode physics -> video -> physics and compare with original
+        full_cycle_input = self.channel_adapter.decode(
+            self.spatial_decoder(
+                self.spatial_encoder(
+                    self.channel_adapter.encode(input_flat)
+                )
+            )
         )
+        cycle_loss = F.mse_loss(full_cycle_input, input_flat)
         
-        # Add noise to latents
-        noisy_latents = self.pipe.scheduler.add_noise(
-            target_latents, noise, timesteps
+        # === Total Loss ===
+        total_loss = (
+            adapter_recon_loss * 1.0 +      # Channel adapter reconstruction
+            spatial_recon_loss * 0.5 +       # Spatial adapter reconstruction
+            temporal_loss * 0.1 +            # Temporal consistency
+            cycle_loss * 0.5                 # Full cycle consistency
         )
-        
-        # Prepare condition image latent
-        condition_latent = self._encode_condition_image(condition_image)
-        
-        # Predict noise with transformer
-        noise_pred = self.transformer(
-            hidden_states=noisy_latents,
-            timestep=timesteps,
-            encoder_hidden_states=prompt_embeds,
-            # Additional conditioning can be added here
-        ).sample
-        
-        # Compute loss
-        loss = F.mse_loss(noise_pred, noise)
-        
-        # Compute additional losses
-        adapter_loss = self.channel_adapter.get_reconstruction_loss(
-            rearrange(input_frames, "B T H W C -> (B T) C H W")
-        )
-        
-        total_loss = loss + 0.1 * adapter_loss
         
         return {
             "loss": total_loss,
-            "diffusion_loss": loss,
-            "adapter_loss": adapter_loss,
-            "noise_pred": noise_pred,
-            "target_latents": target_latents,
+            "adapter_loss": adapter_recon_loss,
+            "spatial_loss": spatial_recon_loss,
+            "temporal_loss": temporal_loss,
+            "cycle_loss": cycle_loss,
+            "encoded_input": encoded_input,
+            "encoded_target": encoded_target,
         }
     
     def _get_empty_prompt_embeds(self, batch_size: int) -> torch.Tensor:

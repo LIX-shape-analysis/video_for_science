@@ -302,8 +302,10 @@ class Trainer:
                     
                     metrics = {
                         "train/loss": reduced_loss,
-                        "train/diffusion_loss": outputs["diffusion_loss"].item(),
-                        "train/adapter_loss": outputs["adapter_loss"].item(),
+                        "train/adapter_loss": outputs.get("adapter_loss", torch.tensor(0)).item() if torch.is_tensor(outputs.get("adapter_loss", 0)) else outputs.get("adapter_loss", 0),
+                        "train/spatial_loss": outputs.get("spatial_loss", torch.tensor(0)).item() if torch.is_tensor(outputs.get("spatial_loss", 0)) else outputs.get("spatial_loss", 0),
+                        "train/temporal_loss": outputs.get("temporal_loss", torch.tensor(0)).item() if torch.is_tensor(outputs.get("temporal_loss", 0)) else outputs.get("temporal_loss", 0),
+                        "train/cycle_loss": outputs.get("cycle_loss", torch.tensor(0)).item() if torch.is_tensor(outputs.get("cycle_loss", 0)) else outputs.get("cycle_loss", 0),
                         "train/lr": self.optimizer.param_groups[0]["lr"],
                         "train/epoch": self.epoch,
                     }
