@@ -1,0 +1,117 @@
+# Stage 2: Train temporal predictor only
+# Freeze: channel/spatial adapters
+# Load: Stage 1 checkpoint (adapters already trained)
+# Goal: Learn temporal dynamics in VAE latent space
+#
+# Run with:
+#   torchrun --nproc_per_node=4 scripts/train.py \
+#     --config configs/stage2_temporal.yaml \
+#     --resume_from checkpoints/stage1/best_model_adapters.pt
+
+# Model configuration
+model:
+  name: "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+  dtype: "bfloat16"
+  channel_adapter:
+    input_channels: 4
+    output_channels: 3
+    hidden_dim: 64
+    num_layers: 2
+    use_residual: true
+  temporal_predictor:
+    enabled: true
+    type: "convlstm"
+    hidden_channels: 64
+
+# LoRA configuration
+lora:
+  enabled: true
+  rank: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:
+    - "to_q"
+    - "to_k"
+    - "to_v"
+    - "to_out.0"
+    - "ff.net.0.proj"
+    - "ff.net.2"
+
+# Data configuration
+data:
+  base_path: "./datasets/datasets"
+  dataset_name: "turbulent_radiative_layer_2D"
+  n_steps_input: 4
+  n_steps_output: 8
+  use_normalization: false
+  train_split: "train"
+  val_split: "valid"
+  val_fraction: 0.1
+  spatial_size: [128, 384]
+  target_size: [128, 384]
+
+# Training configuration - STAGE 2
+training:
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  num_epochs: 30  # Stage 2: 30 epochs
+  max_steps: null
+  
+  # *** STAGE 2 FREEZE SETTINGS ***
+  freeze_adapters: true            # Adapters are FROZEN
+  freeze_temporal_predictor: false # Temporal predictor is TRAINABLE
+  
+  optimizer:
+    name: "adamw"
+    lr: 5.0e-5  # Lower LR for stable temporal learning
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+  
+  scheduler:
+    name: "cosine"
+    warmup_steps: 300
+    num_cycles: 1
+  
+  max_grad_norm: 1.0
+  mixed_precision: "bf16"
+  
+  checkpoint_every: 500
+  checkpoint_dir: "./checkpoints/stage2"
+  resume_from: null  # Pass via --resume_from on command line
+  
+  log_every: 10
+  eval_every: 250
+  seed: 42
+
+# Distributed training
+distributed:
+  enabled: true
+  backend: "nccl"
+  use_fsdp: false
+  use_deepspeed: false
+
+# Evaluation
+evaluation:
+  batch_size: 1
+  num_samples: 100
+  metrics:
+    - "vrmse"
+    - "mse"
+    - "psnr"
+  save_predictions: true
+  prediction_dir: "./predictions/stage2"
+
+# Logging
+logging:
+  use_wandb: false
+  wandb_project: "wan22-well-stage2"
+  use_tensorboard: true
+  tensorboard_dir: "./logs/stage2"
+
+# Hardware
+hardware:
+  num_gpus: 4
+  gpu_ids: [0, 1, 2, 3]
+  num_workers: 4
+  pin_memory: true
