@@ -16,6 +16,7 @@ from pathlib import Path
 import yaml
 import torch
 import json
+import numpy as np
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -401,8 +402,15 @@ def main():
     )
     
     print("\nRollout VRMSE per step:")
-    for i, vrmse in enumerate(rollout_metrics["per_step_vrmse"]):
-        print(f"  Step {i+1}: {vrmse:.4f}")
+    per_step_vrmse = rollout_metrics.get("per_step_vrmse", [])
+    if isinstance(per_step_vrmse, list) and len(per_step_vrmse) > 0:
+        for i, vrmse in enumerate(per_step_vrmse):
+            if not np.isnan(vrmse):
+                print(f"  Step {i+1}: {vrmse:.4f}")
+            else:
+                print(f"  Step {i+1}: N/A")
+    else:
+        print("  No rollout metrics available (may need more target frames)")
     
     # Save all results
     all_results = {
