@@ -486,6 +486,55 @@ class Wan22VideoModel(nn.Module):
             "encoded_target": encoded_target,
         }
     
+    @torch.no_grad()
+    def predict_adapter_only(
+        self,
+        input_frames: torch.Tensor,
+        num_frames: int = 8,
+    ) -> torch.Tensor:
+        """
+        Predict future frames using only the adapters (no diffusion pipeline).
+        
+        This uses the same logic as training:
+        1. Encode input through channel adapter (4ch → 3ch)
+        2. Pass through spatial adapter cycle
+        3. Decode back to physics (3ch → 4ch)
+        4. Use the last frame's reconstruction as prediction
+        
+        This is useful for evaluating adapter quality without the diffusion model.
+        
+        Args:
+            input_frames: Input physics frames (B, T_in, H, W, C)
+            num_frames: Number of frames to "predict"
+            
+        Returns:
+            Predicted physics frames (B, num_frames, H, W, C)
+        """
+        # Ensure channel-last format
+        if input_frames.dim() == 5 and input_frames.shape[2] == 4:
+            input_frames = rearrange(input_frames, "B T C H W -> B T H W C")
+        
+        B, T_in, H, W, C = input_frames.shape
+        
+        # Use the last input frame for prediction
+        last_frame = input_frames[:, -1]  # (B, H, W, C)
+        last_frame_flat = rearrange(last_frame, "B H W C -> B C H W")
+        
+        # Full adapter cycle: physics → video → spatial up → spatial down → physics
+        encoded = self.channel_adapter.encode(last_frame_flat)  # (B, 3, H, W)
+        upsampled = self.spatial_encoder(encoded)  # (B, 3, H', W')
+        downsampled = self.spatial_decoder(upsampled)  # (B, 3, H, W)
+        reconstructed = self.channel_adapter.decode(downsampled)  # (B, 4, H, W)
+        
+        # Convert back to (B, H, W, C)
+        reconstructed = rearrange(reconstructed, "B C H W -> B H W C")
+        
+        # Repeat the reconstruction for all output frames
+        # This is the "repeat last frame through adapter" baseline
+        predictions = reconstructed.unsqueeze(1).expand(-1, num_frames, -1, -1, -1)
+        
+        return predictions.contiguous()
+    
     def _get_empty_prompt_embeds(self, batch_size: int) -> torch.Tensor:
         """Get text embeddings for empty/physics prompt."""
         # Use a simple physics-related prompt

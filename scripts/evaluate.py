@@ -156,6 +156,12 @@ def main():
         default=None,
         help="Path to dataset (overrides config)"
     )
+    parser.add_argument(
+        "--adapter-only",
+        action="store_true",
+        help="Use adapter-only prediction (no diffusion pipeline). "
+             "This matches the training pipeline and is much faster."
+    )
     
     args = parser.parse_args()
     
@@ -179,6 +185,7 @@ def main():
     print(f"\nCheckpoint: {args.checkpoint}")
     print(f"Output directory: {args.output_dir}")
     print(f"Samples: {args.num_samples}")
+    print(f"Mode: {'ADAPTER-ONLY (fast)' if getattr(args, 'adapter_only', False) else 'Full Diffusion Pipeline'}")
     print("=" * 60)
     
     # Create model
@@ -283,11 +290,17 @@ def main():
     print(f"Validation samples: {len(val_loader.dataset)}")
     
     # Create evaluator
+    adapter_only = getattr(args, 'adapter_only', False)
+    if adapter_only:
+        print("\nUsing ADAPTER-ONLY mode (no diffusion pipeline)")
+        print("This matches the training pipeline and is much faster.\n")
+    
     evaluator = Evaluator(
         model=model,
         config=config,
         val_loader=val_loader,
         device=str(device),
+        adapter_only=adapter_only,
     )
     
     # Compute baseline metrics first

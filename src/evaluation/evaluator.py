@@ -33,6 +33,7 @@ class Evaluator:
         config: Dict[str, Any],
         val_loader: DataLoader,
         device: str = "cuda",
+        adapter_only: bool = False,
     ):
         """
         Initialize evaluator.
@@ -42,11 +43,13 @@ class Evaluator:
             config: Configuration dictionary
             val_loader: Validation data loader
             device: Computation device
+            adapter_only: If True, use adapter-only prediction (no diffusion pipeline)
         """
         self.model = model
         self.config = config
         self.val_loader = val_loader
         self.device = device
+        self.adapter_only = adapter_only
         
         # Setup metrics
         self.metrics = PhysicsMetrics(device=device)
@@ -150,20 +153,30 @@ class Evaluator:
         Returns:
             Predicted frames (B, num_frames, H, W, C)
         """
-        # Check if model has generate method
-        if hasattr(self.model, 'generate'):
-            predictions = self.model.generate(
-                input_frames,
-                num_frames=num_frames,
-            )
+        if self.adapter_only:
+            # Use adapter-only prediction (same as training pipeline)
+            if hasattr(self.model, 'predict_adapter_only'):
+                predictions = self.model.predict_adapter_only(
+                    input_frames,
+                    num_frames=num_frames,
+                )
+            else:
+                raise ValueError("Model does not support adapter-only prediction")
         else:
-            # Fallback: use forward pass and extract prediction
-            outputs = self.model(
-                input_frames=input_frames,
-                target_frames=input_frames,  # Dummy target
-            )
-            # This would need model-specific handling
-            predictions = input_frames[:, -num_frames:]
+            # Use full diffusion pipeline
+            if hasattr(self.model, 'generate'):
+                predictions = self.model.generate(
+                    input_frames,
+                    num_frames=num_frames,
+                )
+            else:
+                # Fallback: use forward pass and extract prediction
+                outputs = self.model(
+                    input_frames=input_frames,
+                    target_frames=input_frames,  # Dummy target
+                )
+                # This would need model-specific handling
+                predictions = input_frames[:, -num_frames:]
         
         return predictions
     
