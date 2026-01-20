@@ -360,9 +360,12 @@ class Evaluator:
             input_frames = batch["input_frames_normalized"].to(self.device)
             target_frames = batch["target_frames_normalized"].to(self.device)
             
-            # Ensure we have enough target frames
+            # Get number of target frames available
             T_target = target_frames.shape[1]
-            if T_target < num_rollout_steps:
+            # Use the minimum of requested steps and available target frames
+            actual_steps = min(num_rollout_steps, T_target)
+            
+            if actual_steps == 0:
                 continue
             
             # Initialize current input
@@ -370,7 +373,7 @@ class Evaluator:
             step_errors_vrmse = []
             step_errors_mse = []
             
-            for step in range(min(num_rollout_steps, T_target)):
+            for step in range(actual_steps):
                 # Predict next frame
                 with torch.no_grad():
                     pred = self._generate_predictions(current_input, num_frames=1)
@@ -394,11 +397,20 @@ class Evaluator:
             samples_evaluated += input_frames.shape[0]
         
         # Average over samples
-        results = {
-            'per_step_vrmse': np.mean(per_step_errors['vrmse'], axis=0).tolist(),
-            'per_step_mse': np.mean(per_step_errors['mse'], axis=0).tolist(),
-            'num_steps': num_rollout_steps,
-        }
+        if len(per_step_errors['vrmse']) == 0:
+            results = {
+                'per_step_vrmse': [],
+                'per_step_mse': [],
+                'num_steps': 0,
+                'note': 'No samples had enough target frames for rollout evaluation'
+            }
+        else:
+            actual_num_steps = len(per_step_errors['vrmse'][0]) if per_step_errors['vrmse'] else 0
+            results = {
+                'per_step_vrmse': np.mean(per_step_errors['vrmse'], axis=0).tolist(),
+                'per_step_mse': np.mean(per_step_errors['mse'], axis=0).tolist(),
+                'num_steps': actual_num_steps,
+            }
         
         # Save rollout metrics
         rollout_path = self.output_dir / "rollout_metrics.json"
