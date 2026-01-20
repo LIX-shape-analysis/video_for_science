@@ -7,6 +7,7 @@ This module provides a wrapper around the Wan2.2-I2V model that:
 3. Provides training and inference interfaces
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -753,18 +754,27 @@ class Wan22VideoModel(nn.Module):
         target_latents_seq = rearrange(target_latents, "B C T H W -> B T C H W")
         
         # === Step 3: Temporal Prediction ===
-        # Predict target latents from input latents
+        # Calculate how many latent frames we need to decode to get T_out physics frames
+        # VAE decode formula: T_decoded = (T_latent - 1) * 4 + 1
+        # So to get at least T_out frames: T_latent >= (T_out - 1) / 4 + 1
+        T_latent_needed = math.ceil((T_out - 1) / 4) + 1
         T_target_lat = target_latents_seq.shape[1]
         
+        # Use the max of what we encoded and what we need for decoding
+        T_predict = max(T_target_lat, T_latent_needed)
+        
         if hasattr(self.temporal_predictor, 'forward'):
-            result = self.temporal_predictor(input_latents_seq, num_future_frames=T_target_lat)
+            result = self.temporal_predictor(input_latents_seq, num_future_frames=T_predict)
             if isinstance(result, tuple):
                 predicted_latents, _ = result
             else:
                 predicted_latents = result
         
-        # Temporal prediction loss in latent space
-        temporal_pred_loss = F.mse_loss(predicted_latents, target_latents_seq)
+        # Temporal prediction loss in latent space (only on frames we have targets for)
+        temporal_pred_loss = F.mse_loss(
+            predicted_latents[:, :T_target_lat], 
+            target_latents_seq
+        )
         
         # === Step 4: Decode predicted latents and compute physics loss ===
         # Rearrange back for VAE decoder
@@ -775,25 +785,16 @@ class Wan22VideoModel(nn.Module):
         
         # Debug: check decode output
         if not hasattr(self, '_logged_decode'):
-            print(f"  Predicted latents: {predicted_latents_vae.shape[2]} → Decoded frames: {predicted_physics.shape[1]}")
-            print(f"  Expected {T_out} frames, got {predicted_physics.shape[1]}")
+            print(f"  Predicted {T_predict} latent frames → Decoded to {predicted_physics.shape[1]} frames")
+            print(f"  Will truncate to {T_out} target frames")
             self._logged_decode = True
         
-        # Physics reconstruction loss
-        # Note: VAE has temporal compression, so decoded frames may not match target count
-        # Compare only the frames we have
-        T_pred = predicted_physics.shape[1]
-        T_target = target_frames.shape[1]
-        T_compare = min(T_pred, T_target)
+        # Truncate decoded frames to match target count
+        # VAE decode: T_decoded = (T_latent - 1) * 4 + 1, so we may have extra frames
+        predicted_physics = predicted_physics[:, :T_out]
         
-        if T_compare > 0:
-            physics_pred_loss = F.mse_loss(
-                predicted_physics[:, :T_compare],
-                target_frames[:, :T_compare]
-            )
-        else:
-            # Fallback: just compute loss on whatever we have
-            physics_pred_loss = torch.tensor(0.0, device=predicted_physics.device)
+        # Physics reconstruction loss (now shapes should match)
+        physics_pred_loss = F.mse_loss(predicted_physics, target_frames)
         
         # === Total Loss ===
         # Note: temporal_pred_loss in latent space is the primary objective
@@ -849,8 +850,13 @@ class Wan22VideoModel(nn.Module):
         # Rearrange for temporal predictor: (B, T, C, H, W)
         input_latents_seq = rearrange(input_latents, "B C T H W -> B T C H W")
         
-        # Step 2: Predict future latents
-        result = self.temporal_predictor(input_latents_seq, num_future_frames=num_frames)
+        # Step 2: Calculate how many latent frames needed for num_frames output
+        # VAE decode formula: T_decoded = (T_latent - 1) * 4 + 1
+        # So to get at least num_frames: T_latent >= (num_frames - 1) / 4 + 1
+        T_latent_needed = math.ceil((num_frames - 1) / 4) + 1
+        
+        # Predict future latents
+        result = self.temporal_predictor(input_latents_seq, num_future_frames=T_latent_needed)
         if isinstance(result, tuple):
             predicted_latents, _ = result
         else:
@@ -861,6 +867,9 @@ class Wan22VideoModel(nn.Module):
         
         # Step 3: Decode to physics frames
         predicted_physics = self.decode_vae_latent_to_physics(predicted_latents_vae)
+        
+        # Truncate to requested number of frames
+        predicted_physics = predicted_physics[:, :num_frames]
         
         return predicted_physics
     
