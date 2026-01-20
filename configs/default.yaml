@@ -44,6 +44,19 @@ data:
   spatial_size: [128, 384]  # [H, W] of the physics data
   target_size: [128, 384]  # Target size for Wan2.2 (will be resized)
 
+# Generation/Inference configuration  
+generation:
+  # Text prompt for video generation
+  # Options:
+  #   - Descriptive physics prompt (recommended)
+  #   - Empty string "" to rely on image conditioning only
+  prompt: "Scientific visualization of turbulent radiative layer dynamics. Fluid simulation showing the temporal evolution of density, pressure, and velocity fields with complex turbulent mixing patterns."
+  negative_prompt: "static, still image, no motion, blurry, low quality, artifacts"
+  # Generation parameters
+  num_frames: 81  # Number of frames to generate (should be 4n+1)
+  num_inference_steps: 40
+  guidance_scale: 3.5
+
 # Training configuration
 training:
   # Batch and epochs
