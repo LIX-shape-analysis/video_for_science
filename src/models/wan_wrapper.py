@@ -196,6 +196,14 @@ class Wan22VideoModel(nn.Module):
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
         
+        # Convert trainable adapters to model dtype for FSDP compatibility
+        # FSDP requires all parameters to have uniform dtype
+        self.channel_adapter = self.channel_adapter.to(self.dtype)
+        self.spatial_encoder = self.spatial_encoder.to(self.dtype)
+        self.spatial_decoder = self.spatial_decoder.to(self.dtype)
+        if self.temporal_predictor is not None:
+            self.temporal_predictor = self.temporal_predictor.to(self.dtype)
+        
         # Move to device - both the module and the pipeline
         self.to(self.device)
         self.pipe.to(self.device)
