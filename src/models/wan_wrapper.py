@@ -168,14 +168,17 @@ class Wan22VideoModel(nn.Module):
         if self.lora_enabled:
             print("Applying LoRA to transformer...")
             self.transformer = get_peft_model(self.transformer, self.lora_config)
+            # IMPORTANT: Update the pipeline's transformer reference to use the LoRA-wrapped version
+            self.pipe.transformer = self.transformer
             self.transformer.print_trainable_parameters()
         
         # Freeze non-trainable components
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
         
-        # Move to device
+        # Move to device - both the module and the pipeline
         self.to(self.device)
+        self.pipe.to(self.device)
         
         self._model_loaded = True
         print("Model loaded successfully!")
@@ -622,7 +625,13 @@ class Wan22VideoModel(nn.Module):
         if "lora_weights" in checkpoint and self.transformer is not None:
             for name, param in self.transformer.named_parameters():
                 if name in checkpoint["lora_weights"]:
-                    param.data = checkpoint["lora_weights"][name]
+                    # Use copy_ to ensure tensor stays on correct device
+                    param.data.copy_(checkpoint["lora_weights"][name].to(param.device))
+        
+        # Ensure everything is on the correct device
+        self.to(self.device)
+        if self.pipe is not None:
+            self.pipe.to(self.device)
         
         print(f"Checkpoint loaded from {path}")
 
