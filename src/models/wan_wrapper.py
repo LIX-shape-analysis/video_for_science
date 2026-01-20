@@ -739,6 +739,14 @@ class Wan22VideoModel(nn.Module):
         input_latents = self.encode_physics_to_vae_latent(input_frames, requires_grad=False)
         target_latents = self.encode_physics_to_vae_latent(target_frames, requires_grad=False)
         
+        # Debug: print shapes to understand VAE compression
+        if not hasattr(self, '_logged_shapes'):
+            print(f"\n[DEBUG] VAE temporal compression analysis:")
+            print(f"  Input frames: {T_in} → Input latents: {input_latents.shape[2]} (ratio: {T_in/input_latents.shape[2]:.2f}x)")
+            print(f"  Target frames: {T_out} → Target latents: {target_latents.shape[2]} (ratio: {T_out/target_latents.shape[2]:.2f}x)")
+            print(f"  Latent shape: {input_latents.shape}")
+            self._logged_shapes = True
+        
         # input_latents: (B, C_lat, T_in_lat, H_lat, W_lat)
         # Rearrange for temporal predictor: (B, T, C, H, W)
         input_latents_seq = rearrange(input_latents, "B C T H W -> B T C H W")
@@ -764,6 +772,12 @@ class Wan22VideoModel(nn.Module):
         
         # Decode to physics frames
         predicted_physics = self.decode_vae_latent_to_physics(predicted_latents_vae)
+        
+        # Debug: check decode output
+        if not hasattr(self, '_logged_decode'):
+            print(f"  Predicted latents: {predicted_latents_vae.shape[2]} → Decoded frames: {predicted_physics.shape[1]}")
+            print(f"  Expected {T_out} frames, got {predicted_physics.shape[1]}")
+            self._logged_decode = True
         
         # Physics reconstruction loss
         # Note: VAE has temporal compression, so decoded frames may not match target count
