@@ -593,6 +593,11 @@ class Wan22VideoModel(nn.Module):
         # Rearrange to expected format
         physics_output = rearrange(physics_output, "B T C H W -> B T H W C")
         
+        # Slice to match requested number of frames
+        # (Wan2.2 may generate more frames due to divisibility requirements)
+        if physics_output.shape[1] > num_frames:
+            physics_output = physics_output[:, :num_frames]
+        
         return physics_output
     
     def save_checkpoint(self, path: str):
