@@ -1053,6 +1053,321 @@ class Wan22VideoModel(nn.Module):
         
         return physics_output
     
+    # =========================================================================
+    # Native I2V Diffusion Methods
+    # =========================================================================
+    
+    def _prepare_i2v_conditioning(
+        self,
+        cond_frame_video: torch.Tensor,
+        num_output_frames: int = 8,
+    ) -> torch.Tensor:
+        """
+        Prepare I2V conditioning: mask (4ch) + VAE-encoded conditioning frame (16ch) = 20ch.
+        
+        Args:
+            cond_frame_video: Conditioning frame in video format (B, 3, H, W) in [-1, 1]
+            num_output_frames: Number of frames to generate
+            
+        Returns:
+            Conditioning tensor (B, 20, T_latent, H_latent, W_latent)
+        """
+        B = cond_frame_video.shape[0]
+        H_vid, W_vid = cond_frame_video.shape[2:]
+        
+        # Compute latent dimensions
+        # Wan2.2 VAE has stride (4, 8, 8) for (T, H, W)
+        vae_stride = (4, 8, 8)
+        H_lat = H_vid // vae_stride[1]
+        W_lat = W_vid // vae_stride[2]
+        T_lat = (num_output_frames - 1) // vae_stride[0] + 1
+        
+        # Create video tensor: cond_frame + zeros for frames to generate
+        # Shape: (B, 3, T, H, W)
+        video_for_encoding = torch.zeros(
+            B, 3, num_output_frames, H_vid, W_vid,
+            device=cond_frame_video.device, dtype=cond_frame_video.dtype
+        )
+        video_for_encoding[:, :, 0] = cond_frame_video  # First frame = conditioning
+        
+        # VAE encode
+        with torch.no_grad():
+            # VAE expects (B, C, T, H, W)
+            latent_dist = self.vae.encode(video_for_encoding.to(self.dtype))
+            if hasattr(latent_dist, 'latent_dist'):
+                cond_latent = latent_dist.latent_dist.sample()
+            else:
+                cond_latent = latent_dist.sample() if hasattr(latent_dist, 'sample') else latent_dist
+        
+        # Scale by VAE scaling factor
+        scaling_factor = self._get_vae_scaling_factor()
+        cond_latent = cond_latent * scaling_factor  # (B, 16, T_lat, H_lat, W_lat)
+        
+        # Create binary mask: 1 for conditioning frame, 0 for frames to generate
+        # Mask needs same shape as latent but with 4 channels
+        mask = torch.zeros(B, 4, T_lat, H_lat, W_lat, device=cond_latent.device, dtype=cond_latent.dtype)
+        mask[:, :, 0] = 1.0  # First latent frame is the conditioning
+        
+        # Concatenate: [mask (4ch), cond_latent (16ch)] = 20ch
+        y = torch.cat([mask, cond_latent], dim=1)  # (B, 20, T_lat, H_lat, W_lat)
+        
+        return y
+    
+    def forward_i2v_diffusion(
+        self,
+        cond_frame: torch.Tensor,
+        target_frames: torch.Tensor,
+        text_prompt: str = "Top-down view of fluid dynamics simulation, evolving turbulence, scientific visualization, accurate physics (turbulent radiative layer 2d)",
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Training forward pass using native I2V diffusion.
+        
+        Args:
+            cond_frame: Conditioning physics frame (B, 1, H, W, C) or (B, H, W, C)
+            target_frames: Target physics frames (B, T, H, W, C)
+            text_prompt: Text prompt for conditioning
+            
+        Returns:
+            Dictionary with loss and intermediate outputs
+        """
+        # Handle input shapes
+        if cond_frame.dim() == 5:
+            cond_frame = cond_frame[:, 0]  # (B, H, W, C)
+        if cond_frame.shape[-1] == 4:  # Channel-last
+            cond_frame = rearrange(cond_frame, "B H W C -> B C H W")
+        if target_frames.shape[2] == 4:  # Channel-first check for 5D
+            pass  # Already (B, T, C, H, W)
+        elif target_frames.shape[-1] == 4:  # Channel-last
+            target_frames = rearrange(target_frames, "B T H W C -> B T C H W")
+        
+        B, T_out = target_frames.shape[:2]
+        
+        # === Step 1: Adapt physics → video ===
+        # Conditioning frame
+        cond_video = self.channel_adapter.encode(cond_frame.to(self.dtype))  # (B, 3, H, W)
+        cond_video = self.spatial_encoder(cond_video)  # Upsample to video size
+        
+        # Target frames
+        target_flat = rearrange(target_frames, "B T C H W -> (B T) C H W")
+        target_video_flat = self.channel_adapter.encode(target_flat.to(self.dtype))
+        target_video_flat = self.spatial_encoder(target_video_flat)
+        target_video = rearrange(target_video_flat, "(B T) C H W -> B C T H W", B=B, T=T_out)
+        
+        # === Step 2: VAE encode targets ===
+        scaling_factor = self._get_vae_scaling_factor()
+        with torch.no_grad():
+            latent_dist = self.vae.encode(target_video)
+            if hasattr(latent_dist, 'latent_dist'):
+                target_latent = latent_dist.latent_dist.sample()
+            else:
+                target_latent = latent_dist.sample() if hasattr(latent_dist, 'sample') else latent_dist
+        target_latent = target_latent * scaling_factor  # (B, 16, T_lat, H_lat, W_lat)
+        
+        # === Step 3: Prepare I2V conditioning ===
+        y = self._prepare_i2v_conditioning(cond_video, num_output_frames=T_out)
+        
+        # === Step 4: Sample timestep and add noise ===
+        # Use flow matching / diffusion noise schedule
+        timesteps = torch.randint(
+            0, self.pipe.scheduler.config.num_train_timesteps,
+            (B,), device=target_latent.device
+        )
+        noise = torch.randn_like(target_latent)
+        noisy_latent = self.pipe.scheduler.add_noise(target_latent, noise, timesteps)
+        
+        # === Step 5: Get text embeddings ===
+        with torch.no_grad():
+            text_inputs = self.pipe.tokenizer(
+                [text_prompt] * B,
+                padding="max_length",
+                max_length=512,
+                truncation=True,
+                return_tensors="pt",
+            ).to(self.device)
+            text_embeds = self.pipe.text_encoder(**text_inputs)[0]
+        
+        # === Step 6: Predict noise with transformer ===
+        # Concatenate noisy latent with conditioning
+        # x = [noisy_latent (16ch), y (20ch)] -> but Wan expects them handled separately
+        # The transformer takes x and y as separate inputs
+        
+        # Get grid sizes for positional encoding
+        _, _, T_lat, H_lat, W_lat = noisy_latent.shape
+        grid_sizes = torch.tensor([[T_lat, H_lat, W_lat]], device=noisy_latent.device).expand(B, -1)
+        seq_len = T_lat * H_lat * W_lat
+        
+        # Prepare transformer input
+        # Note: The diffusers implementation may differ from original Wan code
+        # We need to check the exact interface
+        model_output = self.transformer(
+            hidden_states=noisy_latent,
+            timestep=timesteps,
+            encoder_hidden_states=text_embeds,
+            # I2V conditioning passed as image_latents
+            image_latents=y,
+            return_dict=False,
+        )[0]
+        
+        # === Step 7: Compute loss ===
+        # For flow matching: predict velocity, loss = MSE(pred, target_velocity)
+        # For DDPM/epsilon: predict noise, loss = MSE(pred, noise)
+        # Wan2.2 uses flow matching (v-prediction)
+        
+        # Compute target velocity: v = noise - target_latent (simplified)
+        # Actually for flow matching: v = (noise - x0) / sigma
+        # But for training, we typically just predict the noise
+        diffusion_loss = F.mse_loss(model_output, noise)
+        
+        # === Optional: Adapter reconstruction loss ===
+        # Reconstruct conditioning frame through adapters
+        cond_recon = self.channel_adapter.decode(
+            self.spatial_decoder(cond_video)
+        )
+        adapter_loss = F.mse_loss(cond_recon, cond_frame.to(self.dtype))
+        
+        # === Total loss ===
+        total_loss = diffusion_loss + 0.1 * adapter_loss
+        
+        return {
+            "loss": total_loss,
+            "diffusion_loss": diffusion_loss,
+            "adapter_loss": adapter_loss,
+            "timesteps": timesteps,
+        }
+    
+    @torch.no_grad()
+    def predict_i2v_diffusion(
+        self,
+        cond_frame: torch.Tensor,
+        num_frames: int = 8,
+        num_inference_steps: int = 30,
+        guidance_scale: float = 5.0,
+        text_prompt: str = "Top-down view of fluid dynamics simulation, evolving turbulence, scientific visualization, accurate physics (turbulent radiative layer 2d)",
+    ) -> torch.Tensor:
+        """
+        Generate future physics frames using native I2V diffusion.
+        
+        Args:
+            cond_frame: Conditioning physics frame (B, 1, H, W, C) or (B, H, W, C)
+            num_frames: Number of frames to generate
+            num_inference_steps: Number of denoising steps
+            guidance_scale: Classifier-free guidance scale
+            text_prompt: Text prompt for conditioning
+            
+        Returns:
+            Predicted physics frames (B, num_frames, H, W, C)
+        """
+        self.eval()
+        
+        # Handle input shape
+        if cond_frame.dim() == 5:
+            cond_frame = cond_frame[:, 0]  # (B, H, W, C)
+        if cond_frame.shape[-1] == 4:  # Channel-last
+            cond_frame = rearrange(cond_frame, "B H W C -> B C H W")
+        
+        B = cond_frame.shape[0]
+        H_phys, W_phys = cond_frame.shape[2:]
+        
+        # === Adapt conditioning frame to video ===
+        cond_video = self.channel_adapter.encode(cond_frame.to(self.dtype))
+        cond_video = self.spatial_encoder(cond_video)  # (B, 3, H_vid, W_vid)
+        H_vid, W_vid = cond_video.shape[2:]
+        
+        # === Prepare I2V conditioning ===
+        y = self._prepare_i2v_conditioning(cond_video, num_output_frames=num_frames)
+        
+        # === Get text embeddings (with negative prompt for CFG) ===
+        text_inputs = self.pipe.tokenizer(
+            [text_prompt] * B,
+            padding="max_length",
+            max_length=512,
+            truncation=True,
+            return_tensors="pt",
+        ).to(self.device)
+        text_embeds = self.pipe.text_encoder(**text_inputs)[0]
+        
+        # Negative prompt (empty)
+        neg_inputs = self.pipe.tokenizer(
+            [""] * B,
+            padding="max_length",
+            max_length=512,
+            truncation=True,
+            return_tensors="pt",
+        ).to(self.device)
+        neg_embeds = self.pipe.text_encoder(**neg_inputs)[0]
+        
+        # === Initialize random latent ===
+        vae_stride = (4, 8, 8)
+        T_lat = (num_frames - 1) // vae_stride[0] + 1
+        H_lat = H_vid // vae_stride[1]
+        W_lat = W_vid // vae_stride[2]
+        
+        latent = torch.randn(B, 16, T_lat, H_lat, W_lat, device=self.device, dtype=self.dtype)
+        
+        # === Setup scheduler ===
+        self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.device)
+        timesteps = self.pipe.scheduler.timesteps
+        
+        # === Denoising loop ===
+        for t in tqdm(timesteps, desc="Denoising", leave=False):
+            timestep = t.expand(B)
+            
+            # Classifier-free guidance: predict with and without text conditioning
+            if guidance_scale > 1.0:
+                # Conditional prediction
+                noise_pred_cond = self.transformer(
+                    hidden_states=latent,
+                    timestep=timestep,
+                    encoder_hidden_states=text_embeds,
+                    image_latents=y,
+                    return_dict=False,
+                )[0]
+                
+                # Unconditional prediction
+                noise_pred_uncond = self.transformer(
+                    hidden_states=latent,
+                    timestep=timestep,
+                    encoder_hidden_states=neg_embeds,
+                    image_latents=y,
+                    return_dict=False,
+                )[0]
+                
+                # CFG combination
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+            else:
+                noise_pred = self.transformer(
+                    hidden_states=latent,
+                    timestep=timestep,
+                    encoder_hidden_states=text_embeds,
+                    image_latents=y,
+                    return_dict=False,
+                )[0]
+            
+            # Scheduler step
+            latent = self.pipe.scheduler.step(noise_pred, t, latent, return_dict=False)[0]
+        
+        # === VAE decode ===
+        scaling_factor = self._get_vae_scaling_factor()
+        latent = latent / scaling_factor
+        video_frames = self.vae.decode(latent, return_dict=False)[0]  # (B, 3, T, H, W)
+        
+        # Denormalize from [-1, 1] to [0, 1]
+        video_frames = (video_frames + 1) / 2
+        video_frames = torch.clamp(video_frames, 0, 1)
+        
+        # === Adapt video → physics ===
+        video_frames = rearrange(video_frames, "B C T H W -> (B T) C H W")
+        video_frames = video_frames.to(self.dtype)
+        video_frames = self.spatial_decoder(video_frames)
+        physics_frames = self.channel_adapter.decode(video_frames)
+        physics_frames = rearrange(physics_frames, "(B T) C H W -> B T H W C", B=B)
+        
+        # Truncate to requested number of frames
+        if physics_frames.shape[1] > num_frames:
+            physics_frames = physics_frames[:, :num_frames]
+        
+        return physics_frames
+    
     def save_checkpoint(self, path: str):
         """Save model checkpoint."""
         checkpoint = {

@@ -1,0 +1,121 @@
+# Native I2V Diffusion Training Config
+# Uses Wan2.2's native image-to-video diffusion for physics simulation
+#
+# Run with:
+#   torchrun --nproc_per_node=4 scripts/train.py --config configs/i2v_native.yaml
+
+# Model configuration
+model:
+  name: "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+  dtype: "bfloat16"
+  channel_adapter:
+    input_channels: 4
+    output_channels: 3
+    hidden_dim: 64
+    num_layers: 2
+    use_residual: true
+  # Temporal predictor disabled - using native diffusion instead
+  temporal_predictor:
+    enabled: false
+
+# LoRA configuration - fine-tune the diffusion transformer
+lora:
+  enabled: true
+  rank: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:
+    - "to_q"
+    - "to_k"
+    - "to_v"
+    - "to_out.0"
+    - "ff.net.0.proj"
+    - "ff.net.2"
+
+# Data configuration
+data:
+  base_path: "./datasets/datasets"
+  dataset_name: "turbulent_radiative_layer_2D"
+  n_steps_input: 1   # Only 1 conditioning frame for I2V
+  n_steps_output: 8  # Generate 8 frames
+  use_normalization: false
+  train_split: "train"
+  val_split: "valid"
+  val_fraction: 0.1
+  spatial_size: [128, 384]
+  target_size: [128, 384]
+
+# Training configuration
+training:
+  # Use native I2V diffusion training
+  use_native_i2v: true
+  
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  num_epochs: 20
+  max_steps: null
+  
+  # All components trained together by default
+  freeze_adapters: false
+  freeze_temporal_predictor: true  # N/A for I2V mode
+  
+  # Text prompt for conditioning
+  text_prompt: "Top-down view of fluid dynamics simulation, evolving turbulence, scientific visualization, accurate physics (turbulent radiative layer 2d)"
+  
+  optimizer:
+    name: "adamw"
+    lr: 1.0e-5  # Lower LR for diffusion fine-tuning
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+  
+  scheduler:
+    name: "cosine"
+    warmup_steps: 500
+    num_cycles: 1
+  
+  max_grad_norm: 1.0
+  mixed_precision: "bf16"
+  
+  checkpoint_every: 500
+  checkpoint_dir: "./checkpoints/i2v_native"
+  resume_from: null
+  
+  log_every: 10
+  eval_every: 250
+  detailed_eval_every: 1000
+  seed: 42
+
+# Distributed training
+distributed:
+  enabled: true
+  backend: "nccl"
+  use_fsdp: false
+  use_deepspeed: false
+
+# Evaluation
+evaluation:
+  batch_size: 1
+  num_samples: 100
+  num_inference_steps: 30  # Wan default
+  guidance_scale: 5.0      # Wan default
+  metrics:
+    - "vrmse"
+    - "mse"
+    - "psnr"
+  save_predictions: true
+  prediction_dir: "./predictions/i2v_native"
+
+# Logging
+logging:
+  use_wandb: false
+  wandb_project: "wan22-well-i2v"
+  use_tensorboard: true
+  tensorboard_dir: "./logs/i2v_native"
+
+# Hardware
+hardware:
+  num_gpus: 4
+  gpu_ids: [0, 1, 2, 3]
+  num_workers: 4
+  pin_memory: true

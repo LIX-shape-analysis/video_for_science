@@ -264,14 +264,30 @@ class Trainer:
                 enabled=train_config["mixed_precision"] in ["fp16", "bf16"],
                 dtype=torch.bfloat16 if train_config["mixed_precision"] == "bf16" else torch.float16,
             ):
-                # Check if model uses temporal predictor
                 model = self.model.module if hasattr(self.model, 'module') else self.model
-                if hasattr(model, 'use_temporal_predictor') and model.use_temporal_predictor:
+                
+                # Check which training mode to use
+                if train_config.get("use_native_i2v", False):
+                    # Native I2V diffusion training: 1 frame -> 8 frames
+                    # Extract first input frame as conditioning
+                    cond_frame = input_frames[:, :1]  # (B, 1, H, W, C)
+                    text_prompt = train_config.get(
+                        "text_prompt",
+                        "Top-down view of fluid dynamics simulation, evolving turbulence, scientific visualization, accurate physics (turbulent radiative layer 2d)"
+                    )
+                    outputs = model.forward_i2v_diffusion(
+                        cond_frame=cond_frame,
+                        target_frames=target_frames,
+                        text_prompt=text_prompt,
+                    )
+                elif hasattr(model, 'use_temporal_predictor') and model.use_temporal_predictor:
+                    # Temporal predictor mode
                     outputs = model.forward_with_temporal_predictor(
                         input_frames=input_frames,
                         target_frames=target_frames,
                     )
                 else:
+                    # Adapter-only mode
                     outputs = self.model(
                         input_frames=input_frames,
                         target_frames=target_frames,
@@ -393,9 +409,19 @@ class Trainer:
                 enabled=self.config["training"]["mixed_precision"] in ["fp16", "bf16"],
                 dtype=torch.bfloat16 if self.config["training"]["mixed_precision"] == "bf16" else torch.float16,
             ):
-                # Check if model uses temporal predictor
                 model = self.model.module if hasattr(self.model, 'module') else self.model
-                if hasattr(model, 'use_temporal_predictor') and model.use_temporal_predictor:
+                train_config = self.config["training"]
+                
+                if train_config.get("use_native_i2v", False):
+                    # Native I2V mode
+                    cond_frame = input_frames[:, :1]
+                    text_prompt = train_config.get("text_prompt", "Top-down view of fluid dynamics simulation, evolving turbulence, scientific visualization, accurate physics (turbulent radiative layer 2d)")
+                    outputs = model.forward_i2v_diffusion(
+                        cond_frame=cond_frame,
+                        target_frames=target_frames,
+                        text_prompt=text_prompt,
+                    )
+                elif hasattr(model, 'use_temporal_predictor') and model.use_temporal_predictor:
                     outputs = model.forward_with_temporal_predictor(
                         input_frames=input_frames,
                         target_frames=target_frames,
@@ -461,7 +487,21 @@ class Trainer:
                 enabled=self.config["training"]["mixed_precision"] in ["fp16", "bf16"],
                 dtype=torch.bfloat16 if self.config["training"]["mixed_precision"] == "bf16" else torch.float16,
             ):
-                if hasattr(model, 'predict_with_temporal_predictor'):
+                train_config = self.config["training"]
+                eval_config = self.config.get("evaluation", {})
+                
+                if train_config.get("use_native_i2v", False):
+                    # Native I2V mode - use first frame as conditioning
+                    cond_frame = input_normalized[:, :1]
+                    text_prompt = train_config.get("text_prompt", "Top-down view of fluid dynamics simulation, evolving turbulence, scientific visualization, accurate physics (turbulent radiative layer 2d)")
+                    predictions = model.predict_i2v_diffusion(
+                        cond_frame=cond_frame,
+                        num_frames=T_out,
+                        num_inference_steps=eval_config.get("num_inference_steps", 30),
+                        guidance_scale=eval_config.get("guidance_scale", 5.0),
+                        text_prompt=text_prompt,
+                    )
+                elif hasattr(model, 'predict_with_temporal_predictor'):
                     predictions = model.predict_with_temporal_predictor(
                         input_normalized,
                         num_frames=T_out,
