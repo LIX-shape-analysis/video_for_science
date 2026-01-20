@@ -483,28 +483,10 @@ class Wan22VideoModel(nn.Module):
             "encoded_target": encoded_target,
         }
     
-    def _get_prompt_embeds(
-        self, 
-        batch_size: int, 
-        prompt: Optional[str] = None
-    ) -> torch.Tensor:
-        """
-        Get text embeddings for the given prompt.
-        
-        Args:
-            batch_size: Number of samples in batch
-            prompt: Text prompt. If None, uses default physics prompt.
-            
-        Returns:
-            Prompt embeddings tensor
-        """
-        if prompt is None:
-            # Default physics-descriptive prompt
-            prompt = (
-                "Scientific visualization of turbulent radiative layer dynamics. "
-                "Fluid simulation showing the temporal evolution of density, pressure, "
-                "and velocity fields with complex turbulent mixing patterns."
-            )
+    def _get_empty_prompt_embeds(self, batch_size: int) -> torch.Tensor:
+        """Get text embeddings for empty/physics prompt."""
+        # Use a simple physics-related prompt
+        prompt = "Physics simulation of fluid dynamics"
         
         # Get a sensible max length (avoid overflow from huge model_max_length)
         max_length = min(
@@ -526,11 +508,6 @@ class Wan22VideoModel(nn.Module):
             )[0]
         
         return prompt_embeds
-    
-    # Alias for backward compatibility
-    def _get_empty_prompt_embeds(self, batch_size: int) -> torch.Tensor:
-        """Get text embeddings for default physics prompt."""
-        return self._get_prompt_embeds(batch_size, prompt=None)
     
     def _encode_condition_image(self, image: torch.Tensor) -> torch.Tensor:
         """Encode condition image to latent."""
@@ -556,39 +533,24 @@ class Wan22VideoModel(nn.Module):
     def generate(
         self,
         input_frames: torch.Tensor,
-        num_frames: int = 81,
+        num_frames: int = 16,
         num_inference_steps: int = 40,
         guidance_scale: float = 3.5,
-        prompt: Optional[str] = None,
-        negative_prompt: Optional[str] = None,
     ) -> torch.Tensor:
         """
         Generate future physics frames given initial conditions.
         
         Args:
             input_frames: Input physics frames (B, T_in, H, W, C)
-            num_frames: Number of frames to generate (should be 4n+1 for Wan2.2)
+            num_frames: Number of frames to generate
             num_inference_steps: Number of diffusion steps
             guidance_scale: Guidance scale
-            prompt: Text prompt describing the video. If None, uses default physics prompt.
-            negative_prompt: Negative prompt for things to avoid.
             
         Returns:
             Generated physics frames (B, num_frames, H, W, C)
         """
         if not self._model_loaded:
             raise RuntimeError("Model not loaded. Call load_pretrained() first.")
-        
-        # Default prompts
-        if prompt is None:
-            prompt = (
-                "Scientific visualization of turbulent radiative layer dynamics. "
-                "Fluid simulation showing the temporal evolution of density, pressure, "
-                "and velocity fields with complex turbulent mixing patterns."
-            )
-        
-        if negative_prompt is None:
-            negative_prompt = "static, still image, no motion, blurry, low quality, artifacts"
         
         # Prepare condition image from first input frame
         condition_image, _ = self.prepare_physics_input(input_frames)
@@ -599,19 +561,13 @@ class Wan22VideoModel(nn.Module):
         # Get dimensions
         height, width = self.video_size
         
-        # Convert condition image to PIL format for pipeline
-        # Pipeline expects PIL images or tensors in specific format
-        from PIL import Image
-        
-        # Denormalize from [-1, 1] to [0, 255]
-        condition_np = ((condition_image[0].permute(1, 2, 0).cpu().numpy() + 1) * 127.5).astype(np.uint8)
-        condition_pil = Image.fromarray(condition_np)
-        
         # Generate using pipeline
+        # Note: This is a simplified version; full implementation would
+        # need proper handling of the pipeline's generate method
         output = self.pipe(
-            image=condition_pil,
-            prompt=prompt,
-            negative_prompt=negative_prompt,
+            image=condition_image,
+            prompt="Physics simulation of turbulent fluid dynamics",
+            negative_prompt="",
             height=height,
             width=width,
             num_frames=num_frames,
@@ -624,11 +580,11 @@ class Wan22VideoModel(nn.Module):
             [torch.from_numpy(np.array(f)) for f in output.frames[0]]
         ).to(self.device)
         
-        # Normalize and convert channels: [0, 255] -> [0, 1]
+        # Normalize and convert channels
         generated_video = generated_video.float() / 255.0
         generated_video = rearrange(generated_video, "T H W C -> 1 T C H W")
         
-        # Decode to physics format using trained adapters
+        # Decode to physics format
         physics_output = self.decode_to_physics(generated_video)
         
         # Rearrange to expected format
