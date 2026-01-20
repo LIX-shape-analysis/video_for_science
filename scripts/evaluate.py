@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.models import create_wan22_model
 from src.data import create_dataloaders
 from src.evaluation import Evaluator, PhysicsMetrics
+from src.evaluation.metrics import compute_vrmse, compute_mse
 
 
 def load_config(config_path: str) -> dict:
@@ -30,6 +31,77 @@ def load_config(config_path: str) -> dict:
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
     return config
+
+
+def compute_baselines(val_loader, num_samples: int = 100, device: str = "cuda"):
+    """
+    Compute baseline metrics for comparison.
+    
+    Baselines:
+    1. Repeat Last Frame: Copy the last input frame as prediction
+    2. Mean Prediction: Predict the mean value (VRMSE = 1.0 by definition)
+    
+    Args:
+        val_loader: Validation data loader
+        num_samples: Number of samples to evaluate
+        device: Computation device
+        
+    Returns:
+        Dictionary with baseline metrics
+    """
+    import numpy as np
+    from tqdm import tqdm
+    
+    repeat_last_mse = []
+    repeat_last_vrmse = []
+    
+    samples_evaluated = 0
+    field_names = ["density", "pressure", "velocity_x", "velocity_y"]
+    
+    print("\nComputing baselines...")
+    
+    for batch in tqdm(val_loader, desc="Baseline evaluation"):
+        if samples_evaluated >= num_samples:
+            break
+        
+        input_frames = batch["input_frames"]  # (B, T_in, H, W, C)
+        target_frames = batch["target_frames"]  # (B, T_out, H, W, C)
+        
+        batch_size = input_frames.shape[0]
+        T_out = target_frames.shape[1]
+        
+        # Baseline: Repeat Last Frame
+        last_frame = input_frames[:, -1:, :, :, :]  # (B, 1, H, W, C)
+        repeat_pred = last_frame.expand(-1, T_out, -1, -1, -1)  # (B, T_out, H, W, C)
+        
+        # Compute metrics
+        mse = compute_mse(repeat_pred, target_frames).item()
+        vrmse = compute_vrmse(repeat_pred, target_frames, field_dim=-1)
+        
+        repeat_last_mse.append(mse)
+        repeat_last_vrmse.append(vrmse.cpu().numpy())
+        
+        samples_evaluated += batch_size
+    
+    # Aggregate results
+    vrmse_per_field = np.mean(repeat_last_vrmse, axis=0)
+    
+    baselines = {
+        "repeat_last_frame": {
+            "mse": float(np.mean(repeat_last_mse)),
+            "vrmse_mean": float(np.mean(vrmse_per_field)),
+            "vrmse_per_field": {
+                name: float(v) for name, v in zip(field_names, vrmse_per_field)
+            }
+        },
+        # Mean prediction baseline: VRMSE = 1.0 by definition
+        "mean_prediction": {
+            "vrmse_mean": 1.0,
+            "note": "VRMSE=1.0 by definition (error equals variance)"
+        }
+    }
+    
+    return baselines
 
 
 def main():
@@ -210,9 +282,20 @@ def main():
         device=str(device),
     )
     
-    # Run evaluation
+    # Compute baseline metrics first
     print("\n" + "=" * 60)
-    print("Running evaluation...")
+    print("Computing baseline metrics...")
+    print("=" * 60)
+    
+    baselines = compute_baselines(
+        val_loader, 
+        num_samples=args.num_samples,
+        device=str(device)
+    )
+    
+    # Run model evaluation
+    print("\n" + "=" * 60)
+    print("Running model evaluation...")
     print("=" * 60)
     
     metrics = evaluator.evaluate(
@@ -220,24 +303,69 @@ def main():
         save_predictions=True,
     )
     
-    # Print results
+    # Print comparative results
     print("\n" + "=" * 60)
-    print("Results:")
+    print("RESULTS COMPARISON")
     print("=" * 60)
     
+    # Baseline results
+    print("\n--- BASELINES ---")
+    print("\n1. Repeat Last Frame:")
+    baseline_rl = baselines["repeat_last_frame"]
+    print(f"   MSE:  {baseline_rl['mse']:.6f}")
+    print(f"   VRMSE (mean): {baseline_rl['vrmse_mean']:.4f}")
+    print("   VRMSE per field:")
+    for field, value in baseline_rl["vrmse_per_field"].items():
+        print(f"      {field}: {value:.4f}")
+    
+    print("\n2. Mean Prediction:")
+    print(f"   VRMSE: 1.0000 (by definition)")
+    
+    # Model results
+    print("\n--- YOUR MODEL ---")
     print("\nPer-field VRMSE:")
     for key, value in metrics.items():
         if key.startswith("vrmse/") and key != "vrmse/mean":
             print(f"  {key}: {value:.4f}")
     
-    print(f"\nMean VRMSE: {metrics.get('vrmse/mean', 'N/A'):.4f}")
+    model_vrmse_mean = metrics.get('vrmse/mean', float('nan'))
+    print(f"\nMean VRMSE: {model_vrmse_mean:.4f}")
     
     print("\nPer-field MSE:")
     for key, value in metrics.items():
         if key.startswith("mse/") and key != "mse/mean":
             print(f"  {key}: {value:.6f}")
     
-    print(f"\nMean MSE: {metrics.get('mse/mean', 'N/A'):.6f}")
+    model_mse_mean = metrics.get('mse/mean', float('nan'))
+    print(f"\nMean MSE: {model_mse_mean:.6f}")
+    
+    # Comparison summary
+    print("\n" + "=" * 60)
+    print("COMPARISON SUMMARY")
+    print("=" * 60)
+    
+    baseline_mse = baseline_rl['mse']
+    baseline_vrmse = baseline_rl['vrmse_mean']
+    
+    mse_improvement = (baseline_mse - model_mse_mean) / baseline_mse * 100 if baseline_mse > 0 else 0
+    vrmse_improvement = (baseline_vrmse - model_vrmse_mean) / baseline_vrmse * 100 if baseline_vrmse > 0 else 0
+    
+    print(f"\nMSE:   Model={model_mse_mean:.6f} vs Baseline={baseline_mse:.6f}")
+    if model_mse_mean < baseline_mse:
+        print(f"       Model is {mse_improvement:.1f}% better than baseline")
+    else:
+        print(f"       Model is {-mse_improvement:.1f}% worse than baseline")
+    
+    print(f"\nVRMSE: Model={model_vrmse_mean:.4f} vs Baseline={baseline_vrmse:.4f}")
+    if model_vrmse_mean < baseline_vrmse:
+        print(f"       Model is {vrmse_improvement:.1f}% better than baseline")
+    else:
+        print(f"       Model is {-vrmse_improvement:.1f}% worse than baseline")
+    
+    if model_vrmse_mean < 1.0:
+        print(f"\n       Model VRMSE < 1.0: Better than mean prediction")
+    else:
+        print(f"\n       Model VRMSE >= 1.0: Not better than mean prediction")
     
     # Create visualizations
     if args.visualize:
@@ -257,8 +385,19 @@ def main():
     
     # Save all results
     all_results = {
-        "metrics": metrics,
+        "model_metrics": metrics,
+        "baselines": baselines,
         "rollout_metrics": rollout_metrics,
+        "comparison": {
+            "model_mse": model_mse_mean,
+            "baseline_mse": baseline_mse,
+            "mse_improvement_pct": mse_improvement,
+            "model_vrmse": model_vrmse_mean,
+            "baseline_vrmse": baseline_vrmse,
+            "vrmse_improvement_pct": vrmse_improvement,
+            "better_than_repeat_last": model_mse_mean < baseline_mse,
+            "better_than_mean_pred": model_vrmse_mean < 1.0,
+        },
         "config": {
             "checkpoint": args.checkpoint,
             "num_samples": args.num_samples,
