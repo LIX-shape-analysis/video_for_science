@@ -243,20 +243,20 @@ def main():
         
         # Load LoRA weights if present
         if lora_weights and model.transformer is not None:
-            # Try to load LoRA weights into the transformer
-            transformer_state = model.transformer.state_dict()
+            # Directly update LoRA parameters in the transformer
             loaded_lora = 0
+            transformer_params = dict(model.transformer.named_parameters())
+            
             for key, value in lora_weights.items():
                 # Transform key from full model to transformer-only
                 if key.startswith("transformer."):
                     transformer_key = key[len("transformer."):]
-                    if transformer_key in transformer_state:
-                        # Ensure tensor is on the correct device
-                        transformer_state[transformer_key] = value.to(device)
+                    if transformer_key in transformer_params:
+                        # Directly copy the data to the parameter
+                        transformer_params[transformer_key].data.copy_(value.to(device))
                         loaded_lora += 1
             
             if loaded_lora > 0:
-                model.transformer.load_state_dict(transformer_state)
                 print(f"  Loaded LoRA weights ({loaded_lora} tensors)")
     else:
         # Try to use the adapter checkpoint file if it exists
@@ -272,6 +272,8 @@ def main():
                 f"Hint: Try using the adapters checkpoint: {adapter_path}"
             )
     
+    # Ensure entire model is on the correct device after loading checkpoint
+    model.to(device)
     model.eval()
     print("Model loaded successfully")
     
