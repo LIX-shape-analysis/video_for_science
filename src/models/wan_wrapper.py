@@ -301,11 +301,13 @@ class Wan22VideoModel(nn.Module):
             elif isinstance(config, dict) and 'scaling_factor' in config:
                 return config['scaling_factor']
             elif hasattr(config, 'get'):
-                return config.get('scaling_factor', 1.0)
+                sf = config.get('scaling_factor', None)
+                if sf is not None:
+                    return sf
         
-        # Default scaling factor for Wan2.2 VAE
-        # Wan2.2 uses a scaling factor around 0.18215 (similar to SD)
-        return 0.18215
+        # Wan2.2 VAE doesn't use a scaling factor (it's 1.0)
+        # Based on the official Wan2.2 code, they don't apply scaling
+        return 1.0
     
     def encode_to_latent(self, frames: torch.Tensor) -> torch.Tensor:
         """
@@ -493,9 +495,18 @@ class Wan22VideoModel(nn.Module):
         # Add time dimension for VAE
         image = image.unsqueeze(2)  # (B, C, 1, H, W)
         
+        scaling_factor = self._get_vae_scaling_factor()
+        
         with torch.no_grad():
-            latent = self.vae.encode(image).latent_dist.sample()
-            latent = latent * self.vae.config.scaling_factor
+            encoded = self.vae.encode(image)
+            # Handle different return types
+            if hasattr(encoded, 'latent_dist'):
+                latent = encoded.latent_dist.sample()
+            elif hasattr(encoded, 'sample'):
+                latent = encoded.sample()
+            else:
+                latent = encoded
+            latent = latent * scaling_factor
         
         return latent
     
