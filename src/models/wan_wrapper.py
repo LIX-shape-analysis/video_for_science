@@ -676,6 +676,9 @@ class Wan22VideoModel(nn.Module):
         video_frames = (video_frames + 1) / 2
         video_frames = torch.clamp(video_frames, 0, 1)
         
+        # Cast to model dtype (adapters may be in bfloat16)
+        video_frames = video_frames.to(self.dtype)
+        
         # Apply spatial decoder to reduce resolution
         video_frames = self.spatial_decoder(video_frames)
         
