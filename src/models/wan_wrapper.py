@@ -16,11 +16,11 @@ import numpy as np
 
 try:
     from diffusers import WanImageToVideoPipeline
-    from diffusers.models import AutoencoderKLWan, WanTransformer3DModel
 except ImportError:
-    raise ImportError(
-        "Please install diffusers from source: "
-        "pip install git+https://github.com/huggingface/diffusers"
+    WanImageToVideoPipeline = None
+    print(
+        "WARNING: diffusers with Wan2.2 support not found. "
+        "Please install from source: pip install git+https://github.com/huggingface/diffusers"
     )
 
 try:

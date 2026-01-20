@@ -40,15 +40,39 @@ cd wan22-well-finetuning
 python -m venv venv
 source venv/bin/activate
 
-# Install dependencies
+# Upgrade pip
+pip install --upgrade pip
+
+# Install PyTorch first (required before other packages)
+pip install torch torchvision
+
+# Install remaining dependencies
 pip install -r requirements.txt
 
 # Install diffusers from source (required for Wan2.2)
 pip install git+https://github.com/huggingface/diffusers
 
-# Install flash-attn (optional but recommended)
+# Optional: Install flash-attn for better performance (requires ninja)
+pip install ninja packaging
+pip install flash-attn --no-build-isolation
+
+# Optional: Install logging tools
+pip install wandb tensorboard
+
+# Optional: Install DeepSpeed for distributed training
+pip install deepspeed
+```
+
+### Troubleshooting Installation
+
+**flash-attn fails to install:**
+```bash
+# Make sure torch is installed first, then:
+pip install ninja packaging
 pip install flash-attn --no-build-isolation
 ```
+
+**If flash-attn still fails**, the code will work without it (using standard attention), though it will be slower and use more memory.
 
 ## Data
 
