@@ -108,7 +108,7 @@ evaluation:
 
 # Logging configuration
 logging:
-  use_wandb: true
+  use_wandb: false  # Set to true and run `wandb login` to enable
   wandb_project: "wan22-well-finetuning"
   wandb_entity: null
   use_tensorboard: true
