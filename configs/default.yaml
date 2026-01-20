@@ -1,0 +1,120 @@
+# Default configuration for Wan2.2 fine-tuning on The Well dataset
+# turbulent_radiative_layer_2D
+
+# Model configuration
+model:
+  name: "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+  dtype: "bfloat16"
+  # Channel adapter settings (4 physics channels <-> 3 RGB channels)
+  channel_adapter:
+    input_channels: 4  # density, pressure, velocity_x, velocity_y
+    output_channels: 3  # RGB for Wan2.2
+    hidden_dim: 64
+    num_layers: 2
+    use_residual: true
+  
+# LoRA configuration
+lora:
+  enabled: true
+  rank: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:
+    - "to_q"
+    - "to_k"
+    - "to_v"
+    - "to_out.0"
+    - "ff.net.0.proj"
+    - "ff.net.2"
+
+# Data configuration
+data:
+  base_path: "./datasets"
+  dataset_name: "turbulent_radiative_layer_2D"
+  n_steps_input: 4  # Number of input frames
+  n_steps_output: 8  # Number of output frames to predict
+  use_normalization: false
+  # Train/val split
+  train_split: "train"
+  val_split: "valid"
+  val_fraction: 0.1  # Use 10% for evaluation if no separate valid split
+  # Data processing
+  spatial_size: [128, 384]  # [H, W] of the physics data
+  target_size: [128, 384]  # Target size for Wan2.2 (will be resized)
+
+# Training configuration
+training:
+  # Batch and epochs
+  batch_size: 1  # Per GPU batch size
+  gradient_accumulation_steps: 4
+  num_epochs: 50
+  max_steps: null  # If set, overrides num_epochs
+  
+  # Optimizer
+  optimizer:
+    name: "adamw"
+    lr: 1.0e-4
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+  
+  # Learning rate scheduler
+  scheduler:
+    name: "cosine"
+    warmup_steps: 500
+    num_cycles: 1
+  
+  # Gradient clipping
+  max_grad_norm: 1.0
+  
+  # Mixed precision
+  mixed_precision: "bf16"
+  
+  # Checkpointing
+  checkpoint_every: 1000
+  checkpoint_dir: "./checkpoints"
+  resume_from: null
+  
+  # Logging
+  log_every: 10
+  eval_every: 500
+  
+  # Seed
+  seed: 42
+
+# Distributed training configuration
+distributed:
+  enabled: true
+  backend: "nccl"
+  # FSDP settings
+  use_fsdp: true
+  fsdp_sharding_strategy: "FULL_SHARD"
+  # DeepSpeed settings (alternative to FSDP)
+  use_deepspeed: false
+  deepspeed_config: null
+
+# Evaluation configuration
+evaluation:
+  batch_size: 1
+  num_samples: 100  # Number of samples to evaluate
+  metrics:
+    - "vrmse"  # Variance-scaled RMSE
+    - "mse"
+    - "psnr"
+  save_predictions: true
+  prediction_dir: "./predictions"
+
+# Logging configuration
+logging:
+  use_wandb: true
+  wandb_project: "wan22-well-finetuning"
+  wandb_entity: null
+  use_tensorboard: true
+  tensorboard_dir: "./logs"
+
+# Hardware configuration
+hardware:
+  num_gpus: 4
+  gpu_ids: [0, 1, 2, 3]
+  num_workers: 4
+  pin_memory: true
