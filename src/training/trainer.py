@@ -436,7 +436,8 @@ class Trainer:
         """Load training checkpoint."""
         print_rank0(f"Loading checkpoint from {checkpoint_path}")
         
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        # Load to CPU first to avoid OOM when all ranks load simultaneously
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
         
         # Load model state
         if hasattr(self.model, 'module'):
