@@ -518,13 +518,17 @@ class Trainer:
             if hasattr(self.val_loader.dataset, 'denormalize'):
                 predictions = self.val_loader.dataset.denormalize(predictions)
             
+            # Truncate targets/baseline to match predictions (VAE may produce fewer frames)
+            T_pred = predictions.shape[1]
+            target_frames_eval = target_frames[:, :T_pred]
+            
             # Baseline: repeat last frame
             last_frame = input_frames[:, -1:, :, :, :]  # (B, 1, H, W, C)
-            baseline_pred = last_frame.expand(-1, T_out, -1, -1, -1)  # (B, T_out, H, W, C)
+            baseline_pred = last_frame.expand(-1, T_pred, -1, -1, -1)  # (B, T_pred, H, W, C)
             
             # Compute VRMSE (per field)
-            model_vrmse = compute_vrmse(predictions, target_frames, field_dim=-1)
-            baseline_vrmse = compute_vrmse(baseline_pred, target_frames, field_dim=-1)
+            model_vrmse = compute_vrmse(predictions, target_frames_eval, field_dim=-1)
+            baseline_vrmse = compute_vrmse(baseline_pred, target_frames_eval, field_dim=-1)
             
             # Accumulate
             if model_vrmse_sum is None:

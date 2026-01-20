@@ -1291,13 +1291,13 @@ class Wan22VideoModel(nn.Module):
         
         # === Initialize random latent ===
         # VAE stride is (4, 8, 8) for (T, H, W)
-        # To get num_frames output, we need: T_lat * stride >= num_frames
-        # With Wan 2.2 VAE: output_frames = (T_lat - 1) * 4 + 1
-        # So T_lat = ceil((num_frames) / 4) to ensure enough frames
-        vae_stride = (4, 8, 8)
-        T_lat = max(2, (num_frames + vae_stride[0] - 1) // vae_stride[0])  # ceil division
-        H_lat = H_vid // vae_stride[1]
-        W_lat = W_vid // vae_stride[2]
+        # Use same T_lat as training: (num_frames - 1) // stride + 1
+        # This produces fewer output frames, which we'll handle in truncation
+        vae_stride_t = 4
+        T_lat = (num_frames - 1) // vae_stride_t + 1
+        # For 8 frames: (8-1)//4 + 1 = 2 latent frames → decodes to 5 frames
+        H_lat = H_vid // 8
+        W_lat = W_vid // 8
         
         latent = torch.randn(B, 16, T_lat, H_lat, W_lat, device=self.device, dtype=self.dtype)
         
