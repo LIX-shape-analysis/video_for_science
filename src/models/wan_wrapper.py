@@ -798,12 +798,11 @@ class Wan22VideoModel(nn.Module):
         
         # === Total Loss ===
         # Note: temporal_pred_loss in latent space is the primary objective
-        # physics_pred_loss is auxiliary (and may be on fewer frames due to VAE compression)
         total_loss = (
             adapter_recon_loss * 1.0 +      # Channel adapter reconstruction
             spatial_recon_loss * 0.5 +       # Spatial adapter reconstruction
             temporal_pred_loss * 2.0 +       # Temporal prediction in latent space (main objective)
-            physics_pred_loss * 0.5          # Physics prediction loss (reduced weight due to frame mismatch)
+            physics_pred_loss * 1.0          # Physics prediction loss
         )
         
         return {
@@ -813,7 +812,7 @@ class Wan22VideoModel(nn.Module):
             "temporal_pred_loss": temporal_pred_loss,
             "physics_pred_loss": physics_pred_loss,
             "predicted_physics": predicted_physics,
-            "target_physics": target_frames[:, :T_compare] if T_compare > 0 else target_frames,
+            "target_physics": target_frames,
         }
     
     @torch.no_grad()
