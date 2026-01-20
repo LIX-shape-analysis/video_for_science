@@ -249,7 +249,8 @@ class Trainer:
             target_frames = batch["target_frames_normalized"].to(self.device)
             
             # Forward pass with mixed precision
-            with torch.cuda.amp.autocast(
+            with torch.amp.autocast(
+                device_type="cuda",
                 enabled=train_config["mixed_precision"] in ["fp16", "bf16"],
                 dtype=torch.bfloat16 if train_config["mixed_precision"] == "bf16" else torch.float16,
             ):
@@ -352,7 +353,8 @@ class Trainer:
             input_frames = batch["input_frames_normalized"].to(self.device)
             target_frames = batch["target_frames_normalized"].to(self.device)
             
-            with torch.cuda.amp.autocast(
+            with torch.amp.autocast(
+                device_type="cuda",
                 enabled=self.config["training"]["mixed_precision"] in ["fp16", "bf16"],
                 dtype=torch.bfloat16 if self.config["training"]["mixed_precision"] == "bf16" else torch.float16,
             ):

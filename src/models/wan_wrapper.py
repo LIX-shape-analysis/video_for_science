@@ -287,6 +287,26 @@ class Wan22VideoModel(nn.Module):
         
         return physics_frames
     
+    def _get_vae_scaling_factor(self) -> float:
+        """Get the VAE scaling factor, handling different config formats."""
+        if self.vae is None:
+            return 1.0
+        
+        # Try different ways to get the scaling factor
+        if hasattr(self.vae, 'config'):
+            config = self.vae.config
+            # Handle FrozenDict or regular config
+            if hasattr(config, 'scaling_factor'):
+                return config.scaling_factor
+            elif isinstance(config, dict) and 'scaling_factor' in config:
+                return config['scaling_factor']
+            elif hasattr(config, 'get'):
+                return config.get('scaling_factor', 1.0)
+        
+        # Default scaling factor for Wan2.2 VAE
+        # Wan2.2 uses a scaling factor around 0.18215 (similar to SD)
+        return 0.18215
+    
     def encode_to_latent(self, frames: torch.Tensor) -> torch.Tensor:
         """
         Encode video frames to latent space using VAE.
@@ -305,10 +325,19 @@ class Wan22VideoModel(nn.Module):
         # VAE expects (B, C, T, H, W) for video
         frames = rearrange(frames, "B T C H W -> B C T H W")
         
+        scaling_factor = self._get_vae_scaling_factor()
+        
         with torch.no_grad():
             # Encode to latent space
-            latents = self.vae.encode(frames).latent_dist.sample()
-            latents = latents * self.vae.config.scaling_factor
+            latent_dist = self.vae.encode(frames)
+            # Handle different return types
+            if hasattr(latent_dist, 'latent_dist'):
+                latents = latent_dist.latent_dist.sample()
+            elif hasattr(latent_dist, 'sample'):
+                latents = latent_dist.sample()
+            else:
+                latents = latent_dist
+            latents = latents * scaling_factor
         
         return latents
     
@@ -325,11 +354,17 @@ class Wan22VideoModel(nn.Module):
         if self.vae is None:
             raise RuntimeError("Model not loaded. Call load_pretrained() first.")
         
-        latents = latents / self.vae.config.scaling_factor
+        scaling_factor = self._get_vae_scaling_factor()
+        latents = latents / scaling_factor
         
         with torch.no_grad():
             # Decode from latent space
-            frames = self.vae.decode(latents).sample
+            decoded = self.vae.decode(latents)
+            # Handle different return types
+            if hasattr(decoded, 'sample'):
+                frames = decoded.sample
+            else:
+                frames = decoded
         
         # Rearrange to (B, T, C, H, W)
         frames = rearrange(frames, "B C T H W -> B T C H W")
@@ -378,8 +413,17 @@ class Wan22VideoModel(nn.Module):
         noise = torch.randn_like(target_latents)
         
         # Sample timesteps
+        # Handle FrozenDict config
+        scheduler_config = self.pipe.scheduler.config
+        if hasattr(scheduler_config, 'num_train_timesteps'):
+            num_train_timesteps = scheduler_config.num_train_timesteps
+        elif isinstance(scheduler_config, dict):
+            num_train_timesteps = scheduler_config.get('num_train_timesteps', 1000)
+        else:
+            num_train_timesteps = 1000  # Default fallback
+        
         timesteps = torch.randint(
-            0, self.pipe.scheduler.config.num_train_timesteps,
+            0, num_train_timesteps,
             (target_latents.shape[0],),
             device=target_latents.device,
         )
