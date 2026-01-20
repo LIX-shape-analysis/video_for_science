@@ -159,7 +159,10 @@ def main():
         print(f"  - Learning rate: {config['training']['optimizer']['lr']}")
         print(f"  - LoRA rank: {config['lora']['rank']}")
         print(f"  - Epochs: {config['training']['num_epochs']}")
-        print(f"  - Device: {device}")
+        if world_size > 1:
+            print(f"  - Devices: cuda:0-{world_size-1} ({world_size} GPUs)")
+        else:
+            print(f"  - Device: {device}")
         print("=" * 60)
     
     # Create data loaders
