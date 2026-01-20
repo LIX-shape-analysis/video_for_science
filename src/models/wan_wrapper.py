@@ -467,10 +467,16 @@ class Wan22VideoModel(nn.Module):
         # Use a simple physics-related prompt
         prompt = "Physics simulation of fluid dynamics"
         
+        # Get a sensible max length (avoid overflow from huge model_max_length)
+        max_length = min(
+            getattr(self.tokenizer, 'model_max_length', 512),
+            512  # Reasonable upper bound
+        )
+        
         inputs = self.tokenizer(
             [prompt] * batch_size,
             padding="max_length",
-            max_length=self.tokenizer.model_max_length,
+            max_length=max_length,
             truncation=True,
             return_tensors="pt",
         )
