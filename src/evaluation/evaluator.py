@@ -153,7 +153,16 @@ class Evaluator:
         Returns:
             Predicted frames (B, num_frames, H, W, C)
         """
-        if self.adapter_only:
+        # Check for temporal predictor (best option for actual prediction)
+        if hasattr(self.model, 'use_temporal_predictor') and self.model.use_temporal_predictor:
+            if hasattr(self.model, 'predict_with_temporal_predictor'):
+                predictions = self.model.predict_with_temporal_predictor(
+                    input_frames,
+                    num_frames=num_frames,
+                )
+            else:
+                raise ValueError("Model has temporal_predictor enabled but no predict_with_temporal_predictor method")
+        elif self.adapter_only:
             # Use adapter-only prediction (same as training pipeline)
             if hasattr(self.model, 'predict_adapter_only'):
                 predictions = self.model.predict_adapter_only(

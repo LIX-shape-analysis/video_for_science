@@ -29,6 +29,7 @@ except ImportError:
     raise ImportError("Please install peft: pip install peft")
 
 from .channel_adapter import ChannelAdapterPair, SpatialAdapter, InverseSpatialAdapter
+from .temporal_predictor import LatentTemporalPredictor, create_temporal_predictor
 
 
 class Wan22VideoModel(nn.Module):
@@ -64,6 +65,10 @@ class Wan22VideoModel(nn.Module):
         lora_alpha: int = 64,
         lora_dropout: float = 0.05,
         lora_target_modules: Optional[List[str]] = None,
+        # Temporal predictor config
+        use_temporal_predictor: bool = False,
+        temporal_predictor_type: str = "convlstm",
+        temporal_hidden_channels: int = 64,
     ):
         """
         Initialize the model wrapper.
@@ -83,6 +88,9 @@ class Wan22VideoModel(nn.Module):
             lora_alpha: LoRA alpha scaling
             lora_dropout: LoRA dropout
             lora_target_modules: Target modules for LoRA
+            use_temporal_predictor: Whether to use temporal predictor in VAE latent space
+            temporal_predictor_type: Type of temporal predictor ("convlstm" or "simple")
+            temporal_hidden_channels: Hidden channels for temporal predictor
         """
         super().__init__()
         
@@ -92,6 +100,7 @@ class Wan22VideoModel(nn.Module):
         self.physics_size = physics_size
         self.video_size = video_size
         self.lora_enabled = lora_enabled
+        self.use_temporal_predictor = use_temporal_predictor
         
         # Initialize channel adapters
         self.channel_adapter = ChannelAdapterPair(
@@ -115,6 +124,16 @@ class Wan22VideoModel(nn.Module):
             channels=video_channels,
             learned=True,
         )
+        
+        # Initialize temporal predictor for VAE latent space prediction
+        self.temporal_predictor = None
+        if use_temporal_predictor:
+            # Wan2.2 VAE has 16 latent channels
+            self.temporal_predictor = create_temporal_predictor(
+                predictor_type=temporal_predictor_type,
+                latent_channels=16,
+                hidden_channels=temporal_hidden_channels,
+            )
         
         # Placeholder for the main model components (loaded lazily)
         self.pipe = None
@@ -193,6 +212,10 @@ class Wan22VideoModel(nn.Module):
         # Spatial adapter parameters
         params.extend(self.spatial_encoder.parameters())
         params.extend(self.spatial_decoder.parameters())
+        
+        # Temporal predictor parameters (if enabled)
+        if self.temporal_predictor is not None:
+            params.extend(self.temporal_predictor.parameters())
         
         # LoRA parameters (if enabled)
         if self.lora_enabled and self.transformer is not None:
@@ -535,6 +558,283 @@ class Wan22VideoModel(nn.Module):
         
         return predictions.contiguous()
     
+    def encode_physics_to_vae_latent(
+        self,
+        physics_frames: torch.Tensor,
+        requires_grad: bool = False,
+    ) -> torch.Tensor:
+        """
+        Encode physics frames all the way to VAE latent space.
+        
+        Pipeline: physics (4ch) -> adapters -> video (3ch) -> VAE -> latent (16ch)
+        
+        Args:
+            physics_frames: Physics frames (B, T, H, W, C) or (B, T, C, H, W)
+            requires_grad: Whether to compute gradients through VAE
+            
+        Returns:
+            VAE latents (B, C_latent, T_latent, H_latent, W_latent)
+        """
+        if self.vae is None:
+            raise RuntimeError("Model not loaded. Call load_pretrained() first.")
+        
+        # Ensure channel-last format: (B, T, H, W, C)
+        if physics_frames.dim() == 5 and physics_frames.shape[2] == 4:
+            physics_frames = rearrange(physics_frames, "B T C H W -> B T H W C")
+        
+        B, T, H, W, C = physics_frames.shape
+        
+        # Flatten batch and time for adapter processing
+        frames_flat = rearrange(physics_frames, "B T H W C -> (B T) C H W")
+        
+        # Apply channel adapter: physics (4ch) -> video (3ch)
+        video_frames = self.channel_adapter.encode(frames_flat)
+        
+        # Apply spatial upsampling to video size
+        video_frames = self.spatial_encoder(video_frames)
+        
+        # Reshape for VAE: (B, T, C, H, W) -> (B, C, T, H, W)
+        _, C_vid, H_vid, W_vid = video_frames.shape
+        video_frames = rearrange(video_frames, "(B T) C H W -> B C T H W", B=B, T=T)
+        
+        # Normalize to [-1, 1] for VAE
+        video_frames = video_frames * 2 - 1  # Assumes input is in [0, 1]
+        
+        # Encode to VAE latent space
+        scaling_factor = self._get_vae_scaling_factor()
+        
+        if requires_grad:
+            latent_dist = self.vae.encode(video_frames.to(self.dtype))
+            if hasattr(latent_dist, 'latent_dist'):
+                latents = latent_dist.latent_dist.sample()
+            elif hasattr(latent_dist, 'sample'):
+                latents = latent_dist.sample()
+            else:
+                latents = latent_dist
+            latents = latents * scaling_factor
+        else:
+            with torch.no_grad():
+                latent_dist = self.vae.encode(video_frames.to(self.dtype))
+                if hasattr(latent_dist, 'latent_dist'):
+                    latents = latent_dist.latent_dist.sample()
+                elif hasattr(latent_dist, 'sample'):
+                    latents = latent_dist.sample()
+                else:
+                    latents = latent_dist
+                latents = latents * scaling_factor
+        
+        return latents.float()
+    
+    def decode_vae_latent_to_physics(
+        self,
+        latents: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Decode VAE latents back to physics frames.
+        
+        Pipeline: latent (16ch) -> VAE decoder -> video (3ch) -> adapters -> physics (4ch)
+        
+        Args:
+            latents: VAE latents (B, C_latent, T_latent, H_latent, W_latent)
+            
+        Returns:
+            Physics frames (B, T, H, W, C)
+        """
+        if self.vae is None:
+            raise RuntimeError("Model not loaded. Call load_pretrained() first.")
+        
+        scaling_factor = self._get_vae_scaling_factor()
+        latents_scaled = latents.to(self.dtype) / scaling_factor
+        
+        # Decode from VAE latent space
+        with torch.no_grad():
+            decoded = self.vae.decode(latents_scaled)
+            if hasattr(decoded, 'sample'):
+                video_frames = decoded.sample
+            else:
+                video_frames = decoded
+        
+        video_frames = video_frames.float()
+        
+        # video_frames is (B, C, T, H, W), convert to (B*T, C, H, W)
+        B, C, T, H_vid, W_vid = video_frames.shape
+        video_frames = rearrange(video_frames, "B C T H W -> (B T) C H W")
+        
+        # Denormalize from [-1, 1] to [0, 1]
+        video_frames = (video_frames + 1) / 2
+        video_frames = torch.clamp(video_frames, 0, 1)
+        
+        # Apply spatial decoder to reduce resolution
+        video_frames = self.spatial_decoder(video_frames)
+        
+        # Apply channel adapter: video (3ch) -> physics (4ch)
+        physics_frames = self.channel_adapter.decode(video_frames)
+        
+        # Reshape back to (B, T, H, W, C)
+        physics_frames = rearrange(physics_frames, "(B T) C H W -> B T H W C", B=B, T=T)
+        
+        return physics_frames
+    
+    def forward_with_temporal_predictor(
+        self,
+        input_frames: torch.Tensor,
+        target_frames: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass for training with temporal prediction in VAE latent space.
+        
+        This trains:
+        1. Channel adapters (physics <-> video)
+        2. Spatial adapters (physics resolution <-> video resolution)
+        3. Temporal predictor (predict future latents from past latents)
+        
+        Args:
+            input_frames: Input physics frames (B, T_in, H, W, C) or (B, T_in, C, H, W)
+            target_frames: Target physics frames (B, T_out, H, W, C) or (B, T_out, C, H, W)
+            
+        Returns:
+            Dictionary with losses and intermediate outputs
+        """
+        if self.temporal_predictor is None:
+            raise RuntimeError("Temporal predictor not initialized. Set use_temporal_predictor=True.")
+        
+        # Ensure channel-last format: (B, T, H, W, C)
+        if input_frames.dim() == 5 and input_frames.shape[2] == 4:
+            input_frames = rearrange(input_frames, "B T C H W -> B T H W C")
+        if target_frames.dim() == 5 and target_frames.shape[2] == 4:
+            target_frames = rearrange(target_frames, "B T C H W -> B T H W C")
+        
+        B, T_in, H, W, C = input_frames.shape
+        _, T_out, _, _, _ = target_frames.shape
+        
+        # === Step 1: Adapter Training (same as before) ===
+        # Flatten for adapter processing
+        input_flat = rearrange(input_frames, "B T H W C -> (B T) C H W")
+        target_flat = rearrange(target_frames, "B T H W C -> (B T) C H W")
+        
+        # Channel adapter: physics -> video -> physics
+        encoded_input = self.channel_adapter.encode(input_flat)
+        encoded_target = self.channel_adapter.encode(target_flat)
+        reconstructed_input = self.channel_adapter.decode(encoded_input)
+        reconstructed_target = self.channel_adapter.decode(encoded_target)
+        
+        adapter_recon_loss = (
+            F.mse_loss(reconstructed_input, input_flat) +
+            F.mse_loss(reconstructed_target, target_flat)
+        ) / 2
+        
+        # Spatial adapter: up -> down cycle
+        up_input = self.spatial_encoder(encoded_input)
+        up_target = self.spatial_encoder(encoded_target)
+        down_input = self.spatial_decoder(up_input)
+        down_target = self.spatial_decoder(up_target)
+        
+        spatial_recon_loss = (
+            F.mse_loss(down_input, encoded_input) +
+            F.mse_loss(down_target, encoded_target)
+        ) / 2
+        
+        # === Step 2: Encode to VAE latent space ===
+        # Note: VAE is frozen, but we still compute latents for temporal prediction
+        input_latents = self.encode_physics_to_vae_latent(input_frames, requires_grad=False)
+        target_latents = self.encode_physics_to_vae_latent(target_frames, requires_grad=False)
+        
+        # input_latents: (B, C_lat, T_in_lat, H_lat, W_lat)
+        # Rearrange for temporal predictor: (B, T, C, H, W)
+        input_latents_seq = rearrange(input_latents, "B C T H W -> B T C H W")
+        target_latents_seq = rearrange(target_latents, "B C T H W -> B T C H W")
+        
+        # === Step 3: Temporal Prediction ===
+        # Predict target latents from input latents
+        T_target_lat = target_latents_seq.shape[1]
+        
+        if hasattr(self.temporal_predictor, 'forward'):
+            result = self.temporal_predictor(input_latents_seq, num_future_frames=T_target_lat)
+            if isinstance(result, tuple):
+                predicted_latents, _ = result
+            else:
+                predicted_latents = result
+        
+        # Temporal prediction loss in latent space
+        temporal_pred_loss = F.mse_loss(predicted_latents, target_latents_seq)
+        
+        # === Step 4: Decode predicted latents and compute physics loss ===
+        # Rearrange back for VAE decoder
+        predicted_latents_vae = rearrange(predicted_latents, "B T C H W -> B C T H W")
+        
+        # Decode to physics frames
+        predicted_physics = self.decode_vae_latent_to_physics(predicted_latents_vae)
+        
+        # Physics reconstruction loss
+        physics_pred_loss = F.mse_loss(predicted_physics, target_frames)
+        
+        # === Total Loss ===
+        total_loss = (
+            adapter_recon_loss * 1.0 +      # Channel adapter reconstruction
+            spatial_recon_loss * 0.5 +       # Spatial adapter reconstruction
+            temporal_pred_loss * 2.0 +       # Temporal prediction in latent space (main objective)
+            physics_pred_loss * 1.0          # Physics prediction loss
+        )
+        
+        return {
+            "loss": total_loss,
+            "adapter_loss": adapter_recon_loss,
+            "spatial_loss": spatial_recon_loss,
+            "temporal_pred_loss": temporal_pred_loss,
+            "physics_pred_loss": physics_pred_loss,
+            "predicted_physics": predicted_physics,
+            "target_physics": target_frames,
+        }
+    
+    @torch.no_grad()
+    def predict_with_temporal_predictor(
+        self,
+        input_frames: torch.Tensor,
+        num_frames: int = 8,
+    ) -> torch.Tensor:
+        """
+        Predict future frames using the temporal predictor in VAE latent space.
+        
+        Pipeline:
+        1. Encode input physics frames to VAE latents
+        2. Use temporal predictor to predict future latents
+        3. Decode predicted latents back to physics frames
+        
+        Args:
+            input_frames: Input physics frames (B, T_in, H, W, C) or (B, T_in, C, H, W)
+            num_frames: Number of future frames to predict
+            
+        Returns:
+            Predicted physics frames (B, num_frames, H, W, C)
+        """
+        if self.temporal_predictor is None:
+            raise RuntimeError("Temporal predictor not initialized. Set use_temporal_predictor=True.")
+        
+        # Ensure channel-last format
+        if input_frames.dim() == 5 and input_frames.shape[2] == 4:
+            input_frames = rearrange(input_frames, "B T C H W -> B T H W C")
+        
+        # Step 1: Encode to VAE latent space
+        input_latents = self.encode_physics_to_vae_latent(input_frames, requires_grad=False)
+        
+        # Rearrange for temporal predictor: (B, T, C, H, W)
+        input_latents_seq = rearrange(input_latents, "B C T H W -> B T C H W")
+        
+        # Step 2: Predict future latents
+        result = self.temporal_predictor(input_latents_seq, num_future_frames=num_frames)
+        if isinstance(result, tuple):
+            predicted_latents, _ = result
+        else:
+            predicted_latents = result
+        
+        # Rearrange for VAE decoder: (B, C, T, H, W)
+        predicted_latents_vae = rearrange(predicted_latents, "B T C H W -> B C T H W")
+        
+        # Step 3: Decode to physics frames
+        predicted_physics = self.decode_vae_latent_to_physics(predicted_latents_vae)
+        
+        return predicted_physics
+    
     def _get_empty_prompt_embeds(self, batch_size: int) -> torch.Tensor:
         """Get text embeddings for empty/physics prompt."""
         # Use a simple physics-related prompt
@@ -657,6 +957,10 @@ class Wan22VideoModel(nn.Module):
             "spatial_decoder": self.spatial_decoder.state_dict(),
         }
         
+        # Save temporal predictor if enabled
+        if self.temporal_predictor is not None:
+            checkpoint["temporal_predictor"] = self.temporal_predictor.state_dict()
+        
         if self.lora_enabled and self.transformer is not None:
             # Save LoRA weights
             checkpoint["lora_weights"] = {
@@ -675,6 +979,11 @@ class Wan22VideoModel(nn.Module):
         self.channel_adapter.load_state_dict(checkpoint["channel_adapter"])
         self.spatial_encoder.load_state_dict(checkpoint["spatial_encoder"])
         self.spatial_decoder.load_state_dict(checkpoint["spatial_decoder"])
+        
+        # Load temporal predictor if present
+        if "temporal_predictor" in checkpoint and self.temporal_predictor is not None:
+            self.temporal_predictor.load_state_dict(checkpoint["temporal_predictor"])
+            print("Loaded temporal predictor weights")
         
         if "lora_weights" in checkpoint and self.transformer is not None:
             for name, param in self.transformer.named_parameters():
@@ -712,6 +1021,12 @@ def create_wan22_model(config: Dict[str, Any]) -> Wan22VideoModel:
     }
     dtype = dtype_map.get(model_config["dtype"], torch.bfloat16)
     
+    # Get temporal predictor config if present
+    temporal_config = model_config.get("temporal_predictor", {})
+    use_temporal_predictor = temporal_config.get("enabled", False)
+    temporal_predictor_type = temporal_config.get("type", "convlstm")
+    temporal_hidden_channels = temporal_config.get("hidden_channels", 64)
+    
     model = Wan22VideoModel(
         model_id=model_config["name"],
         dtype=dtype,
@@ -726,6 +1041,9 @@ def create_wan22_model(config: Dict[str, Any]) -> Wan22VideoModel:
         lora_alpha=lora_config["alpha"],
         lora_dropout=lora_config["dropout"],
         lora_target_modules=lora_config["target_modules"],
+        use_temporal_predictor=use_temporal_predictor,
+        temporal_predictor_type=temporal_predictor_type,
+        temporal_hidden_channels=temporal_hidden_channels,
     )
     
     return model

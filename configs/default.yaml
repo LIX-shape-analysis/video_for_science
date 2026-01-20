@@ -12,6 +12,11 @@ model:
     hidden_dim: 64
     num_layers: 2
     use_residual: true
+  # Temporal predictor settings (for VAE latent space prediction)
+  temporal_predictor:
+    enabled: true  # Set to true to use temporal predictor for actual future prediction
+    type: "convlstm"  # "convlstm" or "simple"
+    hidden_channels: 64  # Hidden dimension for temporal predictor
   
 # LoRA configuration
 lora:

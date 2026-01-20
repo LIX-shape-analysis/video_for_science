@@ -254,10 +254,18 @@ class Trainer:
                 enabled=train_config["mixed_precision"] in ["fp16", "bf16"],
                 dtype=torch.bfloat16 if train_config["mixed_precision"] == "bf16" else torch.float16,
             ):
-                outputs = self.model(
-                    input_frames=input_frames,
-                    target_frames=target_frames,
-                )
+                # Check if model uses temporal predictor
+                model = self.model.module if hasattr(self.model, 'module') else self.model
+                if hasattr(model, 'use_temporal_predictor') and model.use_temporal_predictor:
+                    outputs = model.forward_with_temporal_predictor(
+                        input_frames=input_frames,
+                        target_frames=target_frames,
+                    )
+                else:
+                    outputs = self.model(
+                        input_frames=input_frames,
+                        target_frames=target_frames,
+                    )
                 loss = outputs["loss"] / train_config["gradient_accumulation_steps"]
             
             # Backward pass
@@ -304,11 +312,19 @@ class Trainer:
                         "train/loss": reduced_loss,
                         "train/adapter_loss": outputs.get("adapter_loss", torch.tensor(0)).item() if torch.is_tensor(outputs.get("adapter_loss", 0)) else outputs.get("adapter_loss", 0),
                         "train/spatial_loss": outputs.get("spatial_loss", torch.tensor(0)).item() if torch.is_tensor(outputs.get("spatial_loss", 0)) else outputs.get("spatial_loss", 0),
-                        "train/temporal_loss": outputs.get("temporal_loss", torch.tensor(0)).item() if torch.is_tensor(outputs.get("temporal_loss", 0)) else outputs.get("temporal_loss", 0),
-                        "train/cycle_loss": outputs.get("cycle_loss", torch.tensor(0)).item() if torch.is_tensor(outputs.get("cycle_loss", 0)) else outputs.get("cycle_loss", 0),
                         "train/lr": self.optimizer.param_groups[0]["lr"],
                         "train/epoch": self.epoch,
                     }
+                    # Add temporal predictor specific losses if present
+                    if "temporal_pred_loss" in outputs:
+                        metrics["train/temporal_pred_loss"] = outputs["temporal_pred_loss"].item() if torch.is_tensor(outputs["temporal_pred_loss"]) else outputs["temporal_pred_loss"]
+                    if "physics_pred_loss" in outputs:
+                        metrics["train/physics_pred_loss"] = outputs["physics_pred_loss"].item() if torch.is_tensor(outputs["physics_pred_loss"]) else outputs["physics_pred_loss"]
+                    # Legacy losses (for non-temporal predictor mode)
+                    if "temporal_loss" in outputs:
+                        metrics["train/temporal_loss"] = outputs["temporal_loss"].item() if torch.is_tensor(outputs["temporal_loss"]) else outputs["temporal_loss"]
+                    if "cycle_loss" in outputs:
+                        metrics["train/cycle_loss"] = outputs["cycle_loss"].item() if torch.is_tensor(outputs["cycle_loss"]) else outputs["cycle_loss"]
                     self.log_metrics(metrics, self.global_step)
                 
                 # Evaluation
@@ -360,10 +376,18 @@ class Trainer:
                 enabled=self.config["training"]["mixed_precision"] in ["fp16", "bf16"],
                 dtype=torch.bfloat16 if self.config["training"]["mixed_precision"] == "bf16" else torch.float16,
             ):
-                outputs = self.model(
-                    input_frames=input_frames,
-                    target_frames=target_frames,
-                )
+                # Check if model uses temporal predictor
+                model = self.model.module if hasattr(self.model, 'module') else self.model
+                if hasattr(model, 'use_temporal_predictor') and model.use_temporal_predictor:
+                    outputs = model.forward_with_temporal_predictor(
+                        input_frames=input_frames,
+                        target_frames=target_frames,
+                    )
+                else:
+                    outputs = self.model(
+                        input_frames=input_frames,
+                        target_frames=target_frames,
+                    )
             
             total_loss += outputs["loss"].item()
             num_batches += 1
