@@ -87,11 +87,13 @@ class WellVideoDataset(Dataset):
         # Compute normalization statistics
         self.mu = None
         self.sigma = None
+        self.field_min = None
+        self.field_max = None
         if compute_stats:
             self._compute_statistics(stats_samples)
     
     def _compute_statistics(self, n_samples: int = 1000):
-        """Compute mean and standard deviation for normalization."""
+        """Compute mean, std, and min/max for normalization and clamping."""
         samples = []
         indices = np.linspace(0, len(self.well_dataset) - 1, 
                              min(n_samples, len(self.well_dataset)), 
@@ -107,13 +109,37 @@ class WellVideoDataset(Dataset):
         self.mu = samples.reshape(-1, self.n_fields).mean(dim=0)
         self.sigma = samples.reshape(-1, self.n_fields).std(dim=0)
         
-        # Prevent division by zero
+        # Compute min/max per field for output clamping
+        self.field_min = samples.reshape(-1, self.n_fields).min(dim=0).values
+        self.field_max = samples.reshape(-1, self.n_fields).max(dim=0).values
+        
+        # Prevent division by zero for sigma
         self.sigma = torch.clamp(self.sigma, min=1e-6)
+        
+        print(f"Dataset stats computed over {len(indices)} samples:")
+        print(f"  Field mins: {self.field_min.tolist()}")
+        print(f"  Field maxs: {self.field_max.tolist()}")
     
     def set_statistics(self, mu: torch.Tensor, sigma: torch.Tensor):
         """Set normalization statistics (for validation set)."""
         self.mu = mu
         self.sigma = sigma
+    
+    def set_field_bounds(self, field_min: torch.Tensor, field_max: torch.Tensor):
+        """Set min/max bounds (for validation set)."""
+        self.field_min = field_min
+        self.field_max = field_max
+    
+    def get_field_bounds(self) -> torch.Tensor:
+        """
+        Get per-field min/max bounds for output clamping.
+        
+        Returns:
+            Tensor of shape (n_fields, 2) where [:, 0] = min, [:, 1] = max
+        """
+        if self.field_min is None or self.field_max is None:
+            return None
+        return torch.stack([self.field_min, self.field_max], dim=1)
     
     def normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Normalize the input tensor."""

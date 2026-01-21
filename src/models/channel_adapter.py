@@ -279,14 +279,41 @@ class ChannelAdapterPair(nn.Module):
             num_layers=num_layers,
             use_residual=use_residual,
         )
+        
+        # Output bounds for clamping (None = no clamping)
+        # Should be a tensor of shape (physics_channels, 2) where [:, 0] = min, [:, 1] = max
+        self.register_buffer('output_bounds', None)
+    
+    def set_output_bounds(self, bounds: torch.Tensor):
+        """
+        Set per-field output bounds for clamping predictions.
+        
+        Args:
+            bounds: Tensor of shape (physics_channels, 2) with [min, max] for each field.
+                    Fields are: [density, pressure, velocity_x, velocity_y]
+        """
+        if bounds.shape[0] != self.physics_channels or bounds.shape[1] != 2:
+            raise ValueError(f"bounds should be shape ({self.physics_channels}, 2), got {bounds.shape}")
+        self.register_buffer('output_bounds', bounds)
+        print(f"Output bounds set: {bounds}")
     
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Convert physics to video format."""
         return self.encoder(x)
     
     def decode(self, x: torch.Tensor) -> torch.Tensor:
-        """Convert video back to physics format."""
-        return self.decoder(x)
+        """Convert video back to physics format with optional clamping."""
+        output = self.decoder(x)
+        
+        # Apply per-field clamping if bounds are set
+        if self.output_bounds is not None:
+            # output shape: (B, C, H, W)
+            for c in range(self.physics_channels):
+                min_val = self.output_bounds[c, 0]
+                max_val = self.output_bounds[c, 1]
+                output[:, c] = torch.clamp(output[:, c], min=min_val.item(), max=max_val.item())
+        
+        return output
     
     def forward(
         self, 

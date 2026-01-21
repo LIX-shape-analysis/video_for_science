@@ -11,6 +11,9 @@ from typing import Dict, Any, Optional, Tuple, List
 from tqdm import tqdm
 import json
 from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for headless servers
+import matplotlib.pyplot as plt
 
 from .optimizer import create_optimizer, create_scheduler, WarmupCosineScheduler
 from ..evaluation.metrics import compute_vrmse, compute_mse
@@ -88,6 +91,14 @@ class Trainer:
         if train_config.get("freeze_temporal_predictor", False):
             if hasattr(self.model, 'freeze_temporal_predictor'):
                 self.model.freeze_temporal_predictor()
+        
+        # Set output bounds on channel adapter from dataset statistics
+        if hasattr(train_loader.dataset, 'get_field_bounds'):
+            field_bounds = train_loader.dataset.get_field_bounds()
+            if field_bounds is not None:
+                if hasattr(self.model, 'channel_adapter') and hasattr(self.model.channel_adapter, 'set_output_bounds'):
+                    self.model.channel_adapter.set_output_bounds(field_bounds.to(self.device))
+                    print_rank0(f"Set output bounds on channel adapter: {field_bounds.tolist()}")
         
         # Wrap model for distributed training
         if self.world_size > 1:
@@ -470,6 +481,10 @@ class Trainer:
         baseline_vrmse_sum = None
         model_mse_sum = 0.0
         baseline_mse_sum = 0.0
+        
+        # Store samples for visualization (only on main process)
+        vis_samples = []  # List of (input, target, prediction, baseline)
+        num_vis_samples = 3
         n_evaluated = 0
         
         field_names = ["density", "pressure", "velocity_x", "velocity_y"]
@@ -542,6 +557,15 @@ class Trainer:
             model_mse_sum += compute_mse(predictions, target_frames_eval).item() * B
             baseline_mse_sum += compute_mse(baseline_pred, target_frames_eval).item() * B
             
+            # Collect samples for visualization (main process only)
+            if should_print and len(vis_samples) < num_vis_samples:
+                vis_samples.append({
+                    'input': input_frames[0].cpu(),  # First sample in batch
+                    'target': target_frames_eval[0].cpu(),
+                    'prediction': predictions[0].cpu(),
+                    'baseline': baseline_pred[0].cpu(),
+                })
+            
             n_evaluated += B
         
         # Average
@@ -588,7 +612,93 @@ class Trainer:
             "detailed_eval/baseline_mse": baseline_mse_avg,
         }, self.global_step)
         
+        # === Save visualization samples (main process only) ===
+        if should_print and vis_samples:
+            vis_dir = self.checkpoint_dir / "visualizations"
+            vis_dir.mkdir(exist_ok=True)
+            
+            for sample_idx, sample in enumerate(vis_samples):
+                fig = self._create_comparison_figure(
+                    sample['input'], sample['target'], 
+                    sample['prediction'], sample['baseline'],
+                    field_names
+                )
+                fig.savefig(
+                    vis_dir / f"step_{self.global_step}_sample_{sample_idx}.png",
+                    dpi=100, bbox_inches='tight'
+                )
+                plt.close(fig)
+            
+            print_rank0(f"Saved {len(vis_samples)} visualization samples to {vis_dir}")
+        
         barrier()
+    
+    def _create_comparison_figure(self, input_frames, target_frames, pred_frames, baseline_frames, field_names):
+        """
+        Create a comparison figure showing input, target, prediction, and baseline.
+        
+        Layout (3 rows, each with input + time steps):
+        - Row 1: Input (4 fields) | GT targets (4 fields × T steps)
+        - Row 2: Input (4 fields) | Baseline (4 fields × T steps)  
+        - Row 3: Input (4 fields) | Model pred (4 fields × T steps)
+        
+        This allows vertical comparison of same time step across approaches.
+        """
+        T_show = min(target_frames.shape[0], 8)  # Show up to 8 time steps
+        n_fields = len(field_names)
+        
+        # Columns: 4 input fields + (4 fields × T_show time steps)
+        n_cols = n_fields + n_fields * T_show
+        n_rows = 3  # GT, Baseline, Model
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(1.5 * n_cols, 3 * n_rows))
+        
+        row_labels = ['Ground Truth', 'Baseline', 'Model Prediction']
+        row_data = [target_frames, baseline_frames, pred_frames]
+        row_colors = ['black', 'red', 'blue']
+        
+        for row_idx, (label, frames, color) in enumerate(zip(row_labels, row_data, row_colors)):
+            # First 4 columns: Input (same for all rows)
+            for c, field_name in enumerate(field_names):
+                ax = axes[row_idx, c]
+                im_data = input_frames[-1, :, :, c].numpy()
+                
+                # Get color scale from target for this field
+                all_target = target_frames[:T_show, :, :, c].numpy()
+                vmin, vmax = all_target.min(), all_target.max()
+                
+                ax.imshow(im_data, cmap='viridis', aspect='auto', vmin=vmin, vmax=vmax)
+                ax.axis('off')
+                
+                # Labels
+                if row_idx == 0:
+                    ax.set_title(f'Input\n{field_name}', fontsize=8)
+                if c == 0:
+                    ax.set_ylabel(label, fontsize=10, fontweight='bold', color=color)
+            
+            # Remaining columns: Predictions for each time step
+            for t in range(T_show):
+                for c, field_name in enumerate(field_names):
+                    col_idx = n_fields + t * n_fields + c
+                    ax = axes[row_idx, col_idx]
+                    
+                    im_data = frames[t, :, :, c].numpy()
+                    
+                    # Use target's color scale for fair comparison
+                    all_target = target_frames[:T_show, :, :, c].numpy()
+                    vmin, vmax = all_target.min(), all_target.max()
+                    
+                    ax.imshow(im_data, cmap='viridis', aspect='auto', vmin=vmin, vmax=vmax)
+                    ax.axis('off')
+                    
+                    # Column header (only first row)
+                    if row_idx == 0:
+                        ax.set_title(f't={t+1}\n{field_name}', fontsize=7)
+        
+        fig.suptitle(f'Step {self.global_step}: Input → Predictions Comparison', fontsize=12)
+        plt.tight_layout()
+        
+        return fig
     
     def save_checkpoint(self, filename: str):
         """Save training checkpoint."""
