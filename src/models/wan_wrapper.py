@@ -1433,8 +1433,8 @@ class Wan22VideoModel(nn.Module):
             # physics_frames: (B, T, H, W, C), reference_frame: (B, H, W, C)
             physics_frames = physics_frames + reference_frame.unsqueeze(1)
             
-            # Apply clamping AFTER adding reference frame
-            physics_frames = self.channel_adapter.clamp_output(physics_frames)
+            # NOTE: No clamping here - data is in normalized space, bounds are unnormalized
+            # Clamping should happen after denormalization if needed
         
         return physics_frames
     
