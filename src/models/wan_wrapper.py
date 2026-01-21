@@ -1406,7 +1406,8 @@ class Wan22VideoModel(nn.Module):
         video_frames = rearrange(video_frames, "B C T H W -> (B T) C H W")
         video_frames = video_frames.to(self.dtype)
         video_frames = self.spatial_decoder(video_frames)
-        physics_frames = self.channel_adapter.decode(video_frames)
+        # Skip clamp in decode if we're in residual mode (will clamp after adding reference)
+        physics_frames = self.channel_adapter.decode(video_frames, skip_clamp=(reference_frame is not None))
         physics_frames = rearrange(physics_frames, "(B T) C H W -> B T H W C", B=B)
         
         # === CRITICAL: Skip frame 0 (conditioning) and return only generated frames ===
@@ -1431,6 +1432,9 @@ class Wan22VideoModel(nn.Module):
             # Broadcast reference to all time steps and add
             # physics_frames: (B, T, H, W, C), reference_frame: (B, H, W, C)
             physics_frames = physics_frames + reference_frame.unsqueeze(1)
+            
+            # Apply clamping AFTER adding reference frame
+            physics_frames = self.channel_adapter.clamp_output(physics_frames)
         
         return physics_frames
     

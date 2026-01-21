@@ -315,17 +315,23 @@ class ChannelAdapterPair(nn.Module):
             raise ValueError(f"bounds should be shape ({self.physics_channels}, 2), got {bounds.shape}")
         self.register_buffer('output_bounds', bounds)
         print(f"Output bounds set: {bounds}")
-    
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Convert physics to video format."""
         return self.encoder(x)
     
-    def decode(self, x: torch.Tensor) -> torch.Tensor:
-        """Convert video back to physics format with optional clamping."""
+    def decode(self, x: torch.Tensor, skip_clamp: bool = False) -> torch.Tensor:
+        """
+        Convert video back to physics format with optional clamping.
+        
+        Args:
+            x: Input tensor (B, C, H, W)
+            skip_clamp: If True, skip clamping (useful for residual mode where
+                       clamping should happen after adding reference frame)
+        """
         output = self.decoder(x)
         
         # Apply per-field clamping if bounds are set (out-of-place to preserve gradients)
-        if self.output_bounds is not None:
+        if self.output_bounds is not None and not skip_clamp:
             # output shape: (B, C, H, W)
             clamped_channels = []
             for c in range(self.physics_channels):
@@ -336,6 +342,35 @@ class ChannelAdapterPair(nn.Module):
             output = torch.cat(clamped_channels, dim=1)
         
         return output
+    
+    def clamp_output(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply per-field clamping to output tensor.
+        Use this after adding reference frame in residual mode.
+        
+        Args:
+            x: Physics tensor (B, T, H, W, C) or (B, C, H, W)
+        """
+        if self.output_bounds is None:
+            return x
+        
+        # Handle different input shapes
+        if x.dim() == 5:  # (B, T, H, W, C)
+            clamped_channels = []
+            for c in range(self.physics_channels):
+                min_val = self.output_bounds[c, 0].item()
+                max_val = self.output_bounds[c, 1].item()
+                clamped = torch.clamp(x[..., c:c+1], min=min_val, max=max_val)
+                clamped_channels.append(clamped)
+            return torch.cat(clamped_channels, dim=-1)
+        else:  # (B, C, H, W)
+            clamped_channels = []
+            for c in range(self.physics_channels):
+                min_val = self.output_bounds[c, 0].item()
+                max_val = self.output_bounds[c, 1].item()
+                clamped = torch.clamp(x[:, c:c+1], min=min_val, max=max_val)
+                clamped_channels.append(clamped)
+            return torch.cat(clamped_channels, dim=1)
     
     def forward(
         self, 
