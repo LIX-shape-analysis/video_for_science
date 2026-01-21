@@ -200,6 +200,25 @@ class InverseChannelAdapter(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
     
+    def zero_init_output(self):
+        """
+        Zero-initialize output layers so predictions start at zero.
+        Useful for residual mode where output = reference + delta.
+        Call this after loading pretrained weights if using residual mode.
+        
+        We zero the field_head weights (not scale) to preserve gradient flow.
+        With zero weights: field_head(out) = 0 for any input, but gradients flow.
+        """
+        # Zero the field head weights and biases
+        for head in self.field_heads:
+            nn.init.zeros_(head.weight)
+            if head.bias is not None:
+                nn.init.zeros_(head.bias)
+        # Keep output_scale at 1 for gradient flow, just zero bias
+        nn.init.ones_(self.output_scale)  # Keep at 1, not 0
+        nn.init.zeros_(self.output_bias)
+        print("InverseChannelAdapter output layers zero-initialized for residual mode")
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass.

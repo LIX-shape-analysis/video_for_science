@@ -100,6 +100,14 @@ class Trainer:
                     self.model.channel_adapter.set_output_bounds(field_bounds.to(self.device))
                     print_rank0(f"Set output bounds on channel adapter: {field_bounds.tolist()}")
         
+        # Zero-initialize decoder output for residual prediction mode
+        if train_config.get("use_residual_prediction", False):
+            if hasattr(self.model, 'channel_adapter') and hasattr(self.model.channel_adapter, 'decoder'):
+                decoder = self.model.channel_adapter.decoder
+                if hasattr(decoder, 'zero_init_output'):
+                    decoder.zero_init_output()
+                    print_rank0("Initialized decoder to output zeros (residual mode)")
+        
         # Wrap model for distributed training
         if self.world_size > 1:
             if config["distributed"].get("use_fsdp", False):
@@ -206,6 +214,15 @@ class Trainer:
         print_rank0(f"Starting training for {self.num_epochs} epochs ({self.total_steps} steps)")
         print_rank0(f"Batch size: {train_config['batch_size']} x {self.world_size} GPUs")
         print_rank0(f"Gradient accumulation: {train_config['gradient_accumulation_steps']}")
+        
+        # Run initial evaluation at step 0 (before any training)
+        if self.val_loader and self.global_step == 0:
+            print_rank0("\n=== Initial evaluation at step 0 ===")
+            try:
+                self.detailed_evaluation(num_samples=10)
+            except Exception as e:
+                print_rank0(f"Initial evaluation failed: {e}")
+            self.model.train()
         
         for epoch in range(self.epoch, self.num_epochs):
             self.epoch = epoch
@@ -514,12 +531,21 @@ class Trainer:
                     # Native I2V mode - use first frame as conditioning
                     cond_frame = input_normalized[:, :1]
                     text_prompt = train_config.get("text_prompt", "Top-down view of fluid dynamics simulation, evolving turbulence, scientific visualization, accurate physics (turbulent radiative layer 2d)")
+                    
+                    # Get reference frame for residual mode
+                    reference = None
+                    if train_config.get("use_residual_prediction", False):
+                        reference = batch.get("reference_normalized")
+                        if reference is not None:
+                            reference = reference.to(self.device)
+                    
                     predictions = model.predict_i2v_diffusion(
                         cond_frame=cond_frame,
                         num_frames=T_out,
                         num_inference_steps=eval_config.get("num_inference_steps", 10),  # Fewer steps for fast eval
                         guidance_scale=eval_config.get("guidance_scale", 5.0),
                         text_prompt=text_prompt,
+                        reference_frame=reference,
                     )
                 elif hasattr(model, 'predict_with_temporal_predictor'):
                     predictions = model.predict_with_temporal_predictor(

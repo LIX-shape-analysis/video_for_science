@@ -44,6 +44,7 @@ class WellVideoDataset(Dataset):
         use_normalization: bool = False,
         compute_stats: bool = True,
         stats_samples: int = 1000,
+        use_residual_targets: bool = False,
     ):
         """
         Initialize the dataset.
@@ -57,12 +58,14 @@ class WellVideoDataset(Dataset):
             use_normalization: Whether to use built-in normalization
             compute_stats: Whether to compute normalization statistics
             stats_samples: Number of samples to use for statistics
+            use_residual_targets: If True, targets are deltas (target - last input frame)
         """
         self.base_path = base_path
         self.dataset_name = dataset_name
         self.split = split
         self.n_steps_input = n_steps_input
         self.n_steps_output = n_steps_output
+        self.use_residual_targets = use_residual_targets
         
         # Load the underlying Well dataset
         self.well_dataset = WellDataset(
@@ -181,15 +184,27 @@ class WellVideoDataset(Dataset):
         input_frames = item["input_fields"]
         target_frames = item["output_fields"]
         
+        # Reference frame for residual prediction (last input frame)
+        reference_frame = input_frames[-1:]  # (1, H, W, F)
+        
         # Normalize
         input_normalized = self.normalize(input_frames)
         target_normalized = self.normalize(target_frames)
+        reference_normalized = self.normalize(reference_frame)
+        
+        # Compute residual targets if enabled
+        if self.use_residual_targets:
+            # Target becomes delta from reference frame
+            # Broadcast reference to all time steps: (T_out, H, W, F) - (1, H, W, F)
+            target_normalized = target_normalized - reference_normalized
         
         return {
             "input_frames": input_frames,
-            "target_frames": target_frames,
+            "target_frames": target_frames,  # Original unnormalized targets for eval
             "input_frames_normalized": input_normalized,
-            "target_frames_normalized": target_normalized,
+            "target_frames_normalized": target_normalized,  # May be deltas if residual mode
+            "reference_frame": reference_frame,  # For adding back at inference
+            "reference_normalized": reference_normalized,
             "space_grid": item.get("space_grid"),
             "input_time_grid": item.get("input_time_grid"),
             "output_time_grid": item.get("output_time_grid"),
@@ -239,6 +254,9 @@ def create_dataloaders(
     training_config = config["training"]
     hardware_config = config["hardware"]
     
+    # Check for residual prediction mode
+    use_residual = training_config.get("use_residual_prediction", False)
+    
     # Create training dataset
     train_dataset = WellVideoDataset(
         base_path=data_config["base_path"],
@@ -247,6 +265,7 @@ def create_dataloaders(
         n_steps_input=data_config["n_steps_input"],
         n_steps_output=data_config["n_steps_output"],
         use_normalization=data_config["use_normalization"],
+        use_residual_targets=use_residual,
     )
     
     # Create validation dataset
@@ -258,10 +277,13 @@ def create_dataloaders(
         n_steps_output=data_config["n_steps_output"],
         use_normalization=data_config["use_normalization"],
         compute_stats=False,  # Use training stats
+        use_residual_targets=use_residual,
     )
     
-    # Share normalization statistics
+    # Share normalization statistics and field bounds
     val_dataset.set_statistics(train_dataset.mu, train_dataset.sigma)
+    if train_dataset.field_min is not None:
+        val_dataset.set_field_bounds(train_dataset.field_min, train_dataset.field_max)
     
     # Create samplers for distributed training
     if world_size > 1:

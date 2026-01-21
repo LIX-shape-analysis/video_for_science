@@ -1283,6 +1283,7 @@ class Wan22VideoModel(nn.Module):
         num_inference_steps: int = 30,
         guidance_scale: float = 5.0,
         text_prompt: str = "Top-down view of fluid dynamics simulation, evolving turbulence, scientific visualization, accurate physics (turbulent radiative layer 2d)",
+        reference_frame: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Generate future physics frames using native I2V diffusion.
@@ -1293,6 +1294,7 @@ class Wan22VideoModel(nn.Module):
             num_inference_steps: Number of denoising steps
             guidance_scale: Classifier-free guidance scale
             text_prompt: Text prompt for conditioning
+            reference_frame: If provided (residual mode), add to predictions. Shape (B, 1, H, W, C) or (B, H, W, C)
             
         Returns:
             Predicted physics frames (B, num_frames, H, W, C)
@@ -1416,6 +1418,19 @@ class Wan22VideoModel(nn.Module):
         # Truncate to requested number of frames
         if physics_frames.shape[1] > num_frames:
             physics_frames = physics_frames[:, :num_frames]
+        
+        # === Residual mode: add reference frame back ===
+        if reference_frame is not None:
+            # Handle reference frame shape
+            if reference_frame.dim() == 5:
+                reference_frame = reference_frame[:, 0]  # (B, H, W, C)
+            elif reference_frame.dim() == 4 and reference_frame.shape[-1] != 4:
+                # Assume channel-first (B, C, H, W)
+                reference_frame = rearrange(reference_frame, "B C H W -> B H W C")
+            
+            # Broadcast reference to all time steps and add
+            # physics_frames: (B, T, H, W, C), reference_frame: (B, H, W, C)
+            physics_frames = physics_frames + reference_frame.unsqueeze(1)
         
         return physics_frames
     

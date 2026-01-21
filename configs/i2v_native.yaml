@@ -50,6 +50,10 @@ training:
   # Use native I2V diffusion training
   use_native_i2v: true
   
+  # Residual prediction: train on deltas, add reference back at inference
+  # This preserves spatial structure and makes baseline = input
+  use_residual_prediction: true
+  
   batch_size: 1
   gradient_accumulation_steps: 4
   num_epochs: 20
@@ -83,7 +87,7 @@ training:
   
   log_every: 10
   eval_every: 250
-  detailed_eval_every: 1000
+  detailed_eval_every: 250
   seed: 42
 
 # Distributed training
