@@ -1313,8 +1313,21 @@ class Wan22VideoModel(nn.Module):
         cond_video = self.spatial_encoder(cond_video)  # (B, 3, H_vid, W_vid)
         H_vid, W_vid = cond_video.shape[2:]
         
-        # === Prepare I2V conditioning ===
-        conditioning = self._prepare_i2v_conditioning(cond_video, num_output_frames=num_frames)
+        # === Initialize random latent ===
+        # VAE stride is (4, 8, 8) for (T, H, W)
+        # IMPORTANT: I2V model generates [cond, target0, target1, ...] so we need 1 + num_frames total
+        # Then we return only the generated frames (skip frame 0 which is conditioning)
+        total_video_frames = 1 + num_frames  # cond + targets
+        vae_stride_t = 4
+        T_lat = (total_video_frames - 1) // vae_stride_t + 1
+        # For 9 frames (1 cond + 8 target): (9-1)//4 + 1 = 3 latent frames → decodes to 9 frames
+        H_lat = H_vid // 8
+        W_lat = W_vid // 8
+        
+        # === Prepare I2V conditioning (MUST use total_video_frames to match latent T_lat) ===
+        conditioning = self._prepare_i2v_conditioning(cond_video, num_output_frames=total_video_frames)
+        
+        latent = torch.randn(B, 16, T_lat, H_lat, W_lat, device=self.device, dtype=self.dtype)
         
         # === Get text embeddings (with negative prompt for CFG) ===
         text_inputs = self.pipe.tokenizer(
@@ -1335,19 +1348,6 @@ class Wan22VideoModel(nn.Module):
             return_tensors="pt",
         ).to(self.device)
         neg_embeds = self.pipe.text_encoder(**neg_inputs)[0]
-        
-        # === Initialize random latent ===
-        # VAE stride is (4, 8, 8) for (T, H, W)
-        # IMPORTANT: I2V model generates [cond, target0, target1, ...] so we need 1 + num_frames total
-        # Then we return only the generated frames (skip frame 0 which is conditioning)
-        total_video_frames = 1 + num_frames  # cond + targets
-        vae_stride_t = 4
-        T_lat = (total_video_frames - 1) // vae_stride_t + 1
-        # For 9 frames (1 cond + 8 target): (9-1)//4 + 1 = 3 latent frames → decodes to 9 frames
-        H_lat = H_vid // 8
-        W_lat = W_vid // 8
-        
-        latent = torch.randn(B, 16, T_lat, H_lat, W_lat, device=self.device, dtype=self.dtype)
         
         # === Setup scheduler ===
         self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.device)
