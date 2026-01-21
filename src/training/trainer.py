@@ -6,6 +6,7 @@ import os
 import time
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 from typing import Dict, Any, Optional, Tuple, List
 from tqdm import tqdm
@@ -595,6 +596,24 @@ class Trainer:
             n_evaluated += B
         
         # Average
+        # Aggregate metrics across all GPUs before averaging
+        if self.world_size > 1:
+            # Convert to tensors for all_reduce
+            model_vrmse_tensor = model_vrmse_sum.clone().to(self.device)
+            baseline_vrmse_tensor = baseline_vrmse_sum.clone().to(self.device)
+            mse_tensor = torch.tensor([model_mse_sum, baseline_mse_sum, float(n_evaluated)], device=self.device)
+            
+            # Sum across all GPUs
+            dist.all_reduce(model_vrmse_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(baseline_vrmse_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(mse_tensor, op=dist.ReduceOp.SUM)
+            
+            model_vrmse_sum = model_vrmse_tensor
+            baseline_vrmse_sum = baseline_vrmse_tensor
+            model_mse_sum = mse_tensor[0].item()
+            baseline_mse_sum = mse_tensor[1].item()
+            n_evaluated = int(mse_tensor[2].item())
+        
         model_vrmse_avg = model_vrmse_sum / n_evaluated
         baseline_vrmse_avg = baseline_vrmse_sum / n_evaluated
         model_mse_avg = model_mse_sum / n_evaluated
