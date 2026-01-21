@@ -170,7 +170,7 @@ class Evaluator:
                 "Top-down view of fluid dynamics simulation, evolving turbulence, scientific visualization, accurate physics")
             
             predictions = self.model.predict_i2v_diffusion(
-                cond_frames=input_frames,
+                cond_frame=input_frames,
                 num_frames=num_frames,
                 num_inference_steps=eval_config.get("num_inference_steps", 30),
                 guidance_scale=eval_config.get("guidance_scale", 5.0),

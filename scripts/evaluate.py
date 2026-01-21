@@ -201,9 +201,9 @@ def main():
     
     model.to(device)
     
-    # Load checkpoint
+    # Load checkpoint (to CPU first to avoid OOM)
     print(f"Loading checkpoint from {args.checkpoint}")
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     
     # Handle different checkpoint formats
     if "channel_adapter" in checkpoint and "model_state_dict" not in checkpoint:
