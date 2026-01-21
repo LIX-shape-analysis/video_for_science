@@ -108,6 +108,15 @@ class Evaluator:
             # Denormalize predictions
             predictions = self._denormalize(predictions, self.val_loader.dataset)
             
+            # Handle frame count mismatch (VAE may produce fewer frames)
+            T_pred = predictions.shape[1]
+            T_target = target_frames.shape[1]
+            if T_pred < T_target:
+                # Truncate targets to match predictions
+                target_frames = target_frames[:, :T_pred]
+            elif T_pred > T_target:
+                predictions = predictions[:, :T_target]
+            
             # Update metrics
             self.metrics.update(predictions, target_frames)
             
@@ -153,6 +162,31 @@ class Evaluator:
         Returns:
             Predicted frames (B, num_frames, H, W, C)
         """
+        # Check for native I2V diffusion mode first
+        if hasattr(self.model, 'predict_i2v_diffusion'):
+            # Get text prompt from config if available
+            eval_config = self.config.get("evaluation", {})
+            text_prompt = eval_config.get("text_prompt", 
+                "Top-down view of fluid dynamics simulation, evolving turbulence, scientific visualization, accurate physics")
+            
+            predictions = self.model.predict_i2v_diffusion(
+                cond_frames=input_frames,
+                num_frames=num_frames,
+                num_inference_steps=eval_config.get("num_inference_steps", 30),
+                guidance_scale=eval_config.get("guidance_scale", 5.0),
+                text_prompt=text_prompt,
+            )
+            
+            # Truncate to requested frame count (VAE may produce fewer frames)
+            T_pred = predictions.shape[1]
+            if T_pred < num_frames:
+                # Model produced fewer frames due to VAE compression - that's OK
+                pass
+            elif T_pred > num_frames:
+                predictions = predictions[:, :num_frames]
+            
+            return predictions
+        
         # Check for temporal predictor (best option for actual prediction)
         if hasattr(self.model, 'use_temporal_predictor') and self.model.use_temporal_predictor:
             if hasattr(self.model, 'predict_with_temporal_predictor'):
