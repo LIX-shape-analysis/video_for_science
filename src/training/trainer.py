@@ -102,12 +102,13 @@ class Trainer:
                     print_rank0(f"Set output bounds on channel adapter: {field_bounds.tolist()}")
         
         # Zero-initialize decoder output for residual prediction mode
-        if train_config.get("use_residual_prediction", False):
-            if hasattr(self.model, 'channel_adapter') and hasattr(self.model.channel_adapter, 'decoder'):
-                decoder = self.model.channel_adapter.decoder
-                if hasattr(decoder, 'zero_init_output'):
-                    decoder.zero_init_output()
-                    print_rank0("Initialized decoder to output zeros (residual mode)")
+        # DISABLED: Zero-init causes weights to stay near zero for density/pressure
+        # if train_config.get("use_residual_prediction", False):
+        #     if hasattr(self.model, 'channel_adapter') and hasattr(self.model.channel_adapter, 'decoder'):
+        #         decoder = self.model.channel_adapter.decoder
+        #         if hasattr(decoder, 'zero_init_output'):
+        #             decoder.zero_init_output()
+        #             print_rank0("Initialized decoder to output zeros (residual mode)")
         
         # Wrap model for distributed training
         if self.world_size > 1:
