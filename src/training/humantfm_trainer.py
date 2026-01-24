@@ -270,9 +270,9 @@ class TwoStageTrainer:
         )
         
         for batch_idx, batch in enumerate(pbar):
-            # Get data
-            input_frames = batch['input'].to(self.device)
-            target_frames = batch['target'].to(self.device)
+            # Get data - dataset returns 'input_frames_normalized' and 'target_frames_normalized'
+            input_frames = batch['input_frames_normalized'].to(self.device)
+            target_frames = batch['target_frames_normalized'].to(self.device)
             
             # Conditioning frame is last input frame
             cond_frame = input_frames[:, -1]  # (B, C, H, W) or (B, H, W, C)
@@ -349,8 +349,8 @@ class TwoStageTrainer:
         
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc="Validating", disable=not is_main_process()):
-                input_frames = batch['input'].to(self.device)
-                target_frames = batch['target'].to(self.device)
+                input_frames = batch['input_frames_normalized'].to(self.device)
+                target_frames = batch['target_frames_normalized'].to(self.device)
                 cond_frame = input_frames[:, -1]
                 
                 with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
@@ -408,8 +408,8 @@ class TwoStageTrainer:
                 if batch_idx >= num_samples:
                     break
                 
-                input_frames = batch['input'].to(self.device)
-                target_frames = batch['target'].to(self.device)
+                input_frames = batch['input_frames_normalized'].to(self.device)
+                target_frames = batch['target_frames_normalized'].to(self.device)
                 
                 # Ensure shape is (B, T, C, H, W)
                 if input_frames.dim() == 5 and input_frames.shape[-1] == 4:
