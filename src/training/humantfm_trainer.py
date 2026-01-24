@@ -110,7 +110,7 @@ class TwoStageTrainer:
         
         # Wrap for distributed
         if self.world_size > 1:
-            self.model = wrap_model_ddp(self.model, device_ids=[self.rank])
+            self.model = wrap_model_ddp(self.model, device=self.device)
             print_rank0(f"[TwoStageTrainer] Wrapped model in DDP ({self.world_size} GPUs)")
         
         # Get raw model for attribute access
