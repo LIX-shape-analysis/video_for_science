@@ -408,43 +408,42 @@ class TwoStageTrainer:
                 if batch_idx >= num_samples:
                     break
                 
-                input_frames = batch['input_frames_normalized'].to(self.device)
-                target_frames = batch['target_frames_normalized'].to(self.device)
+                # Get normalized frames for model input
+                input_norm = batch['input_frames_normalized'].to(self.device)
+                target_norm = batch['target_frames_normalized'].to(self.device)
                 
-                # Ensure shape is (B, T, C, H, W)
+                # Get unnormalized frames for metrics (dataset returns these)
+                input_frames = batch['input_frames'].to(self.device)
+                target_frames = batch['target_frames'].to(self.device)
+                
+                # Convert to (B, T, C, H, W) if in (B, T, H, W, C)
+                if input_norm.dim() == 5 and input_norm.shape[-1] == 4:
+                    input_norm = input_norm.permute(0, 1, 4, 2, 3)
+                if target_norm.dim() == 5 and target_norm.shape[-1] == 4:
+                    target_norm = target_norm.permute(0, 1, 4, 2, 3)
                 if input_frames.dim() == 5 and input_frames.shape[-1] == 4:
                     input_frames = input_frames.permute(0, 1, 4, 2, 3)
                 if target_frames.dim() == 5 and target_frames.shape[-1] == 4:
                     target_frames = target_frames.permute(0, 1, 4, 2, 3)
                 
-                cond_frame = input_frames[:, -1]
+                cond_frame = input_norm[:, -1]
                 B, T_out = target_frames.shape[:2]
                 
-                # Denormalize for metrics
-                if hasattr(self.train_loader.dataset, 'denormalize'):
-                    target_denorm = self.train_loader.dataset.denormalize(target_frames.cpu()).to(self.device)
-                    input_denorm = self.train_loader.dataset.denormalize(input_frames.cpu()).to(self.device)
-                else:
-                    target_denorm = target_frames
-                    input_denorm = input_frames
-                
-                # Model prediction
+                # Model prediction (using normalized input)
                 with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
                     pred = self.raw_model.predict(cond_frame, num_frames=T_out, text_prompt=self.text_prompt)
                 
-                # Denormalize prediction
-                if hasattr(self.train_loader.dataset, 'denormalize'):
-                    pred_denorm = self.train_loader.dataset.denormalize(pred.float().cpu()).to(self.device)
-                else:
-                    pred_denorm = pred
+                # Prediction is already in physics space from decoder
+                # If model uses residual, it returns final prediction (reference + delta)
+                pred = pred.float()
                 
-                # Baseline: repeat last input frame
-                baseline = input_denorm[:, -1:].repeat(1, T_out, 1, 1, 1)
+                # Baseline: repeat last input frame (unnormalized)
+                baseline = input_frames[:, -1:].repeat(1, T_out, 1, 1, 1)
                 
                 # Compute metrics per field
                 for c, field in enumerate(field_names):
-                    pred_field = pred_denorm[:, :, c]
-                    target_field = target_denorm[:, :, c]
+                    pred_field = pred[:, :, c]
+                    target_field = target_frames[:, :, c]
                     baseline_field = baseline[:, :, c]
                     
                     model_vrmse[field] += compute_vrmse(pred_field, target_field).item()
