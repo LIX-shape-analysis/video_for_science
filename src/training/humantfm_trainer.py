@@ -440,16 +440,23 @@ class TwoStageTrainer:
                 # Baseline: repeat last input frame (unnormalized)
                 baseline = input_frames[:, -1:].repeat(1, T_out, 1, 1, 1)
                 
-                # Compute metrics per field
+                # Compute metrics per field - use simple RMSE
                 for c, field in enumerate(field_names):
                     pred_field = pred[:, :, c]
                     target_field = target_frames[:, :, c]
                     baseline_field = baseline[:, :, c]
                     
-                    model_vrmse[field] += compute_vrmse(pred_field, target_field).item()
-                    model_mse[field] += compute_mse(pred_field, target_field).item()
-                    baseline_vrmse[field] += compute_vrmse(baseline_field, target_field).item()
-                    baseline_mse[field] += compute_mse(baseline_field, target_field).item()
+                    # Simple RMSE = sqrt(mean((pred - target)^2))
+                    pred_rmse = ((pred_field - target_field) ** 2).mean().sqrt()
+                    baseline_rmse = ((baseline_field - target_field) ** 2).mean().sqrt()
+                    
+                    # Normalize by target std for VRMSE-like metric
+                    target_std = target_field.std() + 1e-8
+                    
+                    model_vrmse[field] += (pred_rmse / target_std).item()
+                    model_mse[field] += ((pred_field - target_field) ** 2).mean().item()
+                    baseline_vrmse[field] += (baseline_rmse / target_std).item()
+                    baseline_mse[field] += ((baseline_field - target_field) ** 2).mean().item()
                 
                 count += 1
         
