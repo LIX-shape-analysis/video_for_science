@@ -141,7 +141,7 @@ class TwoStageTrainer:
         self.current_epoch = 0
         
         # Gradient accumulator
-        self.grad_accumulator = GradientAccumulator(self.grad_accum_steps)
+        self.grad_accumulator = GradientAccumulator(self.grad_accum_steps, self.model)
         
         print_rank0(f"""
 ╔════════════════════════════════════════════════════════════════╗
