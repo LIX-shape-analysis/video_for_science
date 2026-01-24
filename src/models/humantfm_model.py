@@ -165,12 +165,17 @@ class HumanTFMModel(nn.Module):
             return self._cached_text_embeds
         
         with torch.no_grad():
+            # Use a reasonable max_length - tokenizer.model_max_length can be very large
+            max_len = getattr(self.tokenizer, 'model_max_length', 512)
+            if max_len is None or max_len > 1000000:  # Handle overflow cases
+                max_len = 512
+            
             text_inputs = self.tokenizer(
                 text_prompt,
                 return_tensors="pt",
                 padding="max_length",
                 truncation=True,
-                max_length=self.tokenizer.model_max_length,
+                max_length=min(max_len, 512),  # Cap at 512 for safety
             )
             text_embeds = self.text_encoder(
                 text_inputs.input_ids.to(self.device)
