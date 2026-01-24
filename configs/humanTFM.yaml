@@ -107,6 +107,7 @@ distributed:
 
 # Evaluation
 evaluation:
+  batch_size: 1
   num_samples: 100
   save_visualizations: true
   visualization_dir: "${training.checkpoint_dir}/visualizations"
