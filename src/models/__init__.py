@@ -8,6 +8,8 @@ from .temporal_predictor import (
     ConvLSTM,
     create_temporal_predictor,
 )
+from .physics_adapter import PhysicsEncoder, PhysicsDecoder, PhysicsAdapterPair
+from .humantfm_model import HumanTFMModel
 
 __all__ = [
     "ChannelAdapter",
@@ -19,4 +21,9 @@ __all__ = [
     "SimpleTemporalPredictor",
     "ConvLSTM",
     "create_temporal_predictor",
+    "PhysicsEncoder",
+    "PhysicsDecoder",
+    "PhysicsAdapterPair",
+    "HumanTFMModel",
 ]
+

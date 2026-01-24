@@ -148,3 +148,9 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+
+# Images
+*.png
+
+# Dump text files
+*dump.txt

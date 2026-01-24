@@ -1,0 +1,112 @@
+# HumanTFM Training Config
+# One-shot deterministic prediction model with two-stage training
+#
+# Based on HumanTFM paper methodology:
+# - Single forward pass (no diffusion loop)
+# - Fixed timestep t=0
+# - Rectified flow output: x_pred = x_input - v_pred
+# - Stage 1: Latent space loss (decoder frozen)
+# - Stage 2: Ambient space loss (decoder unfrozen)
+#
+# Run with:
+#   torchrun --nproc_per_node=4 scripts/train_humanTFM.py --config configs/humanTFM.yaml
+
+# Model configuration
+model:
+  name: "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+  dtype: "bfloat16"
+  
+  # Physics adapter (handles spatial upsampling too)
+  physics_adapter:
+    physics_channels: 4
+    video_channels: 3
+    hidden_dim: 64
+    physics_size: [128, 384]
+    video_size: [480, 832]
+    use_residual: true
+
+# LoRA configuration - fine-tune the DiT
+lora:
+  enabled: true
+  rank: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:
+    - "to_q"
+    - "to_k"
+    - "to_v"
+    - "to_out.0"
+    - "ff.net.0.proj"
+    - "ff.net.2"
+
+# Data configuration
+data:
+  base_path: "./datasets/datasets"
+  dataset_name: "turbulent_radiative_layer_2D"
+  n_steps_input: 1   # Conditioning frame
+  n_steps_output: 8  # Frames to predict
+  use_normalization: false
+  train_split: "train"
+  val_split: "valid"
+  val_fraction: 0.1
+  spatial_size: [128, 384]
+  target_size: [128, 384]
+
+# Training configuration
+training:
+  # HumanTFM mode (deterministic one-shot)
+  use_humanTFM: true
+  
+  # Two-stage training
+  two_stage:
+    enabled: true
+    min_epochs: 3           # Minimum epochs in Stage 1
+    plateau_patience: 5     # Epochs without improvement before switching
+    plateau_threshold: 0.001  # 0.1% improvement threshold
+  
+  # Residual prediction
+  use_residual_prediction: true
+  
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  num_epochs: 30  # Longer training for two stages
+  
+  # Text prompt
+  text_prompt: "Fluid dynamics simulation, turbulent flow, scientific visualization, accurate physics"
+  
+  optimizer:
+    name: "adamw"
+    lr: 5.0e-5  # Higher LR as recommended in HumanTFM paper
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+  
+  scheduler:
+    name: "cosine"
+    warmup_steps: 500
+    num_cycles: 1
+  
+  max_grad_norm: 1.0
+  mixed_precision: "bf16"
+  
+  checkpoint_every: 500
+  checkpoint_dir: "./checkpoints/humanTFM"
+  resume_from: null
+  
+  log_every: 10
+  eval_every: 500
+  detailed_eval_every: 250
+  seed: 42
+
+# Distributed training
+distributed:
+  enabled: true
+  backend: "nccl"
+  use_fsdp: false
+  use_deepspeed: false
+
+# Evaluation
+evaluation:
+  num_samples: 100
+  save_visualizations: true
+  visualization_dir: "${training.checkpoint_dir}/visualizations"
