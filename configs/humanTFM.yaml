@@ -110,3 +110,18 @@ evaluation:
   num_samples: 100
   save_visualizations: true
   visualization_dir: "${training.checkpoint_dir}/visualizations"
+
+# Logging
+logging:
+  use_wandb: false
+  wandb_project: "wan22-humanTFM"
+  use_tensorboard: true
+  tensorboard_dir: "./logs/humanTFM"
+
+# Hardware
+hardware:
+  num_gpus: 4
+  gpu_ids: [0, 1, 2, 3]
+  num_workers: 4
+  pin_memory: true
+
