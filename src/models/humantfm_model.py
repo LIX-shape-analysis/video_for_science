@@ -577,33 +577,70 @@ class HumanTFMModel(nn.Module):
             path: Path to pretrained adapter checkpoint
             strict: Whether to strictly enforce that all keys match
         """
-        print(f"[HumanTFM] Loading pretrained adapter from {path}...")
+        import os
+        rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+        
+        print(f"[Rank {rank}] Loading pretrained adapter from {path}...")
+        
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"[Rank {rank}] ERROR: Adapter checkpoint not found at {path}")
         
         checkpoint = torch.load(path, map_location='cpu')
         
         # Handle different checkpoint formats
         if 'adapter_state_dict' in checkpoint:
             state_dict = checkpoint['adapter_state_dict']
+            print(f"[Rank {rank}]   Found 'adapter_state_dict' key in checkpoint")
         elif 'state_dict' in checkpoint:
             state_dict = checkpoint['state_dict']
+            print(f"[Rank {rank}]   Found 'state_dict' key in checkpoint")
         else:
             state_dict = checkpoint
+            print(f"[Rank {rank}]   Using checkpoint directly as state_dict")
+        
+        # Log checkpoint keys for debugging
+        print(f"[Rank {rank}]   State dict keys: {list(state_dict.keys())[:5]}... ({len(state_dict)} total)")
         
         # Load weights
         missing, unexpected = self.physics_adapter.load_state_dict(state_dict, strict=strict)
         
         if missing:
-            print(f"  Warning: Missing keys: {missing}")
+            print(f"[Rank {rank}]   ⚠️  Missing keys: {missing}")
         if unexpected:
-            print(f"  Warning: Unexpected keys: {unexpected}")
+            print(f"[Rank {rank}]   ⚠️  Unexpected keys: {unexpected}")
         
-        print(f"[HumanTFM] Adapter loaded successfully!")
+        # ========== VERIFICATION: Log weight statistics ==========
+        print(f"[Rank {rank}] ✓ Adapter loaded! Verifying weights...")
+        
+        # Encoder verification
+        enc_weight = self.physics_adapter.encoder.conv_in.weight
+        enc_sum = enc_weight.sum().item()
+        enc_mean = enc_weight.mean().item()
+        enc_std = enc_weight.std().item()
+        print(f"[Rank {rank}]   Encoder conv_in: sum={enc_sum:.4f}, mean={enc_mean:.6f}, std={enc_std:.6f}")
+        
+        # Decoder verification
+        dec_weight = self.physics_adapter.decoder.conv_out.weight
+        dec_sum = dec_weight.sum().item()
+        dec_mean = dec_weight.mean().item()
+        dec_std = dec_weight.std().item()
+        print(f"[Rank {rank}]   Decoder conv_out: sum={dec_sum:.4f}, mean={dec_mean:.6f}, std={dec_std:.6f}")
+        
+        # Total parameter count verification
+        encoder_params = sum(p.numel() for p in self.physics_adapter.encoder.parameters())
+        decoder_params = sum(p.numel() for p in self.physics_adapter.decoder.parameters())
+        print(f"[Rank {rank}]   Encoder params: {encoder_params:,}, Decoder params: {decoder_params:,}")
         
         # Report validation loss from checkpoint if available
         if 'val_loss' in checkpoint:
-            print(f"  Adapter reconstruction MSE: {checkpoint['val_loss']:.6f}")
+            print(f"[Rank {rank}]   Pretrain reconstruction MSE: {checkpoint['val_loss']:.6f}")
         if 'val_metrics' in checkpoint:
             metrics = checkpoint['val_metrics']
             if 'total_rmse' in metrics:
-                print(f"  Adapter reconstruction RMSE: {metrics['total_rmse']:.4f}")
+                print(f"[Rank {rank}]   Pretrain reconstruction RMSE: {metrics['total_rmse']:.4f}")
+        
+        if 'epoch' in checkpoint:
+            print(f"[Rank {rank}]   Pretrained at epoch: {checkpoint['epoch']}")
+        
+        print(f"[Rank {rank}] ✅ Adapter verification complete!")
 

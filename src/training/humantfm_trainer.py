@@ -143,6 +143,24 @@ class TwoStageTrainer:
         # Gradient accumulator
         self.grad_accumulator = GradientAccumulator(self.grad_accum_steps, self.model)
         
+        # Store sampler reference for set_epoch()
+        self.train_sampler = getattr(train_loader, 'sampler', None)
+        
+        # ========== DISTRIBUTED VERIFICATION ==========
+        print(f"[Rank {self.rank}] Distributed setup verification:")
+        print(f"[Rank {self.rank}]   World size: {self.world_size}")
+        print(f"[Rank {self.rank}]   Device: {self.device}")
+        print(f"[Rank {self.rank}]   Train loader length: {len(train_loader)} batches")
+        print(f"[Rank {self.rank}]   Train sampler type: {type(self.train_sampler).__name__}")
+        if hasattr(self.train_sampler, 'num_replicas'):
+            print(f"[Rank {self.rank}]   Sampler num_replicas: {self.train_sampler.num_replicas}")
+            print(f"[Rank {self.rank}]   Sampler rank: {self.train_sampler.rank}")
+        if dist.is_initialized():
+            print(f"[Rank {self.rank}]   dist.is_initialized(): True")
+            print(f"[Rank {self.rank}]   dist.get_rank(): {dist.get_rank()}")
+            print(f"[Rank {self.rank}]   dist.get_world_size(): {dist.get_world_size()}")
+        barrier()  # Sync all ranks after verification
+        
         print_rank0(f"""
 ╔════════════════════════════════════════════════════════════════╗
 ║           HumanTFM Two-Stage Training Configuration            ║
@@ -231,6 +249,12 @@ class TwoStageTrainer:
         
         for epoch in range(self.num_epochs):
             self.current_epoch = epoch + 1
+            
+            # CRITICAL: Set epoch for DistributedSampler to ensure different data per rank
+            if hasattr(self.train_sampler, 'set_epoch'):
+                self.train_sampler.set_epoch(epoch)
+                if self.rank == 0:
+                    print(f"[Epoch {epoch + 1}] Set sampler epoch for distributed data sharding")
             
             # Train one epoch
             train_loss = self.train_epoch()
@@ -324,7 +348,10 @@ class TwoStageTrainer:
                 
                 # Detailed evaluation
                 if self.global_step % self.detailed_eval_every == 0:
+                    # Sync all ranks before evaluation
+                    barrier()
                     self.detailed_evaluation(num_samples=40)
+                    barrier()  # Sync after evaluation
                     self.model.train()
                 
                 # Checkpointing

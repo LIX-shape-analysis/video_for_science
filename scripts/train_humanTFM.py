@@ -382,9 +382,24 @@ def main():
     model = create_humantfm_model(config)
     
     # Load the pretrained adapter (Stage 0 already completed before distributed setup)
+    # CRITICAL: Load on ALL ranks to ensure consistent initialization
+    import torch.distributed as dist
+    if dist.is_initialized():
+        dist.barrier()  # Ensure all ranks wait for adapter file to be ready
+    
+    if not os.path.exists(adapter_path):
+        raise FileNotFoundError(
+            f"[Rank {rank}] Pretrained adapter not found at: {adapter_path}\n"
+            f"  Please either:\n"
+            f"  1. Run Stage 0 pre-training first, OR\n"
+            f"  2. Provide --pretrained_adapter /path/to/adapter.pt"
+        )
+    
+    # Load adapter on ALL ranks with verification
     model.load_adapter(adapter_path)
-    if rank == 0:
-        print("  ✓ Loaded pretrained adapter weights")
+    
+    if dist.is_initialized():
+        dist.barrier()  # Sync after loading
     
     # Create trainer
     if rank == 0:
