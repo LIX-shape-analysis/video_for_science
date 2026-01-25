@@ -204,6 +204,15 @@ def pretrain_adapter_if_needed(
     print(f"  Final reconstruction MSE: {best_loss:.6f}")
     print(f"  Final reconstruction RMSE: {best_loss**0.5:.4f}\n")
     
+    # CRITICAL: Clean up memory before loading 14B model
+    del adapter, optimizer, train_dataset, train_loader
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    print("[Stage 0] Memory cleaned up for next stage\n")
+    
     return adapter_path
 
 

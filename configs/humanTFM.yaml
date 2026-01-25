@@ -18,13 +18,15 @@ model:
   
   # Physics adapter (handles spatial upsampling too)
   # Reduced video_size to save VRAM (~4x reduction in attention memory)
+  # use_residual=false: Decoder outputs full frames, not deltas
+  # The "flow" aspect is handled in latent space by the DiT, not here
   physics_adapter:
     physics_channels: 4
     video_channels: 3
     hidden_dim: 64
     physics_size: [128, 384]
     video_size: [240, 416]  # Reduced from 480x832 to save memory
-    use_residual: true
+    use_residual: false  # IMPORTANT: Match Stage 0 training
 
 # LoRA configuration - fine-tune the DiT
 lora:
