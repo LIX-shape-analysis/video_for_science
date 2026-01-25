@@ -87,14 +87,17 @@ def pretrain_adapter_if_needed(
     config: dict,
     adapter_path: str,
     device: torch.device,
-    epochs: int = 10,
-    batch_size: int = 8,
+    epochs: int = 20,
+    batch_size: int = 4,
 ) -> str:
     """
-    Pre-train the physics adapter if no checkpoint exists.
+    Pre-train the physics adapter WITH VAE in the loop.
     
-    This is "Stage 0" - trains the adapter as an autoencoder so it can
-    properly map between physics and video space.
+    This is "Stage 0" - trains the adapter as an autoencoder THROUGH the VAE
+    so it learns representations that survive VAE compression.
+    
+    Training path:
+        Physics → Adapter.Encode → VAE.Encode → VAE.Decode → Adapter.Decode → Physics
     
     Returns:
         Path to the (possibly newly created) adapter checkpoint.
@@ -111,14 +114,39 @@ def pretrain_adapter_if_needed(
         return adapter_path
     
     print("\n" + "="*70)
-    print("  STAGE 0: Physics Adapter Pre-training")
+    print("  STAGE 0: Physics Adapter Pre-training WITH VAE")
     print("="*70)
-    print("  Training adapter as autoencoder (encode → decode ≈ identity)")
+    print("  Training adapter through frozen VAE (encode → VAE → decode ≈ identity)")
     print(f"  Epochs: {epochs}")
     print(f"  Output: {adapter_path}")
     print("="*70 + "\n")
     
+    dtype = torch.bfloat16
+    
+    # ================================================================
+    # Load VAE from Wan2.2 (frozen)
+    # ================================================================
+    print("[Stage 0] Loading Wan2.2 VAE...")
+    model_name = config.get("model", {}).get("name", "Wan-AI/Wan2.2-I2V-A14B-Diffusers")
+    
+    from diffusers import WanImageToVideoPipeline
+    pipe = WanImageToVideoPipeline.from_pretrained(model_name, torch_dtype=dtype)
+    vae = pipe.vae.to(device)
+    vae.requires_grad_(False)
+    vae.eval()
+    
+    vae_scaling_factor = getattr(vae.config, 'scaling_factor', 0.18215)
+    print(f"[Stage 0] VAE loaded and frozen (scaling_factor={vae_scaling_factor})")
+    
+    # Clean up pipeline to save memory
+    del pipe.transformer
+    del pipe.text_encoder
+    del pipe
+    torch.cuda.empty_cache()
+    
+    # ================================================================
     # Create adapter
+    # ================================================================
     adapter_config = config.get("model", {}).get("physics_adapter", {})
     adapter = PhysicsAdapterPair(
         physics_channels=adapter_config.get("physics_channels", 4),
@@ -127,9 +155,11 @@ def pretrain_adapter_if_needed(
         physics_size=tuple(adapter_config.get("physics_size", [128, 384])),
         video_size=tuple(adapter_config.get("video_size", [240, 416])),
         use_residual=False,  # No residual for autoencoder training
-    ).to(device)
+    ).to(device).to(dtype)
     
+    # ================================================================
     # Create dataset
+    # ================================================================
     data_config = config.get("data", {})
     train_dataset = WellVideoDataset(
         base_path=data_config.get("base_path", "./datasets/datasets"),
@@ -170,12 +200,37 @@ def pretrain_adapter_if_needed(
             
             frames = frames.to(device).float()
             
-            # Forward
-            video_rep = adapter.encode(frames)
-            reconstructed = adapter.decode(video_rep)
+            # ========================================================
+            # Step 1: Encode Physics -> Video (adapter encoder)
+            # ========================================================
+            video_frames = adapter.encode(frames.to(dtype))  # (B, 3, H_vid, W_vid)
             
-            # Loss
-            loss = F.mse_loss(reconstructed, frames)
+            # ========================================================
+            # Step 2: Pass through FROZEN VAE (the critical bottleneck!)
+            # ========================================================
+            with torch.no_grad():
+                vae_input = video_frames.unsqueeze(2)  # (B, 3, 1, H, W)
+                latent_dist = vae.encode(vae_input)
+                if hasattr(latent_dist, 'latent_dist'):
+                    latents = latent_dist.latent_dist.mode()
+                else:
+                    latents = latent_dist.mode() if hasattr(latent_dist, 'mode') else latent_dist
+                latents = latents * vae_scaling_factor
+                
+                latents_for_decode = latents / vae_scaling_factor
+                decoded = vae.decode(latents_for_decode)
+                video_recon = decoded.sample if hasattr(decoded, 'sample') else decoded
+                video_recon = video_recon.squeeze(2)
+            
+            # ========================================================
+            # Step 3: Decode Video -> Physics (adapter decoder)
+            # ========================================================
+            reconstructed = adapter.decode(video_recon.to(dtype))
+            
+            # ========================================================
+            # Step 4: Reconstruction loss
+            # ========================================================
+            loss = F.mse_loss(reconstructed.float(), frames)
             
             optimizer.zero_grad()
             loss.backward()
@@ -196,16 +251,18 @@ def pretrain_adapter_if_needed(
                 "adapter_state_dict": adapter.state_dict(),
                 "val_loss": avg_loss,
                 "val_metrics": {"total_rmse": avg_loss ** 0.5},
+                "trained_with_vae": True,
             }
             torch.save(checkpoint, adapter_path)
             print(f"  ✓ Saved best adapter (loss: {avg_loss:.6f})")
     
     print(f"\n[Stage 0] Complete! Adapter saved to {adapter_path}")
     print(f"  Final reconstruction MSE: {best_loss:.6f}")
-    print(f"  Final reconstruction RMSE: {best_loss**0.5:.4f}\n")
+    print(f"  Final reconstruction RMSE: {best_loss**0.5:.4f}")
+    print(f"  Trained WITH VAE in loop ✓\n")
     
-    # CRITICAL: Clean up memory before loading 14B model
-    del adapter, optimizer, train_dataset, train_loader
+    # CRITICAL: Clean up memory before loading full 14B model
+    del adapter, optimizer, train_dataset, train_loader, vae
     import gc
     gc.collect()
     if torch.cuda.is_available():
