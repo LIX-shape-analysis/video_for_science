@@ -161,6 +161,8 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--local_rank", type=int, default=-1, 
                         help="Local rank for distributed training")
+    parser.add_argument("--pretrained_adapter", type=str, default=None,
+                        help="Path to pretrained adapter checkpoint (REQUIRED for good results)")
     
     args = parser.parse_args()
     
@@ -213,6 +215,20 @@ def main():
         print("\nInitializing HumanTFM model...")
     
     model = create_humantfm_model(config)
+    
+    # Load pretrained adapter (CRITICAL for good results)
+    if args.pretrained_adapter:
+        model.load_adapter(args.pretrained_adapter)
+        if rank == 0:
+            print("  ✓ Loaded pretrained adapter weights")
+    else:
+        if rank == 0:
+            print("\n" + "!"*70)
+            print("  WARNING: No pretrained adapter specified!")
+            print("  The decoder will be randomly initialized.")
+            print("  Use --pretrained_adapter /path/to/adapter.pt")
+            print("  Run scripts/pretrain_adapter.py first.")
+            print("!"*70 + "\n")
     
     # Create trainer
     if rank == 0:

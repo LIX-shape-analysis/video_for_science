@@ -565,3 +565,45 @@ class HumanTFMModel(nn.Module):
     def set_normalization_stats(self, mu: torch.Tensor, sigma: torch.Tensor):
         """Set normalization stats on decoder."""
         self.physics_adapter.set_normalization_stats(mu, sigma)
+    
+    def load_adapter(self, path: str, strict: bool = True):
+        """
+        Load pretrained physics adapter weights.
+        
+        This should be called BEFORE training to initialize the adapter
+        with weights from autoencoder pre-training.
+        
+        Args:
+            path: Path to pretrained adapter checkpoint
+            strict: Whether to strictly enforce that all keys match
+        """
+        print(f"[HumanTFM] Loading pretrained adapter from {path}...")
+        
+        checkpoint = torch.load(path, map_location='cpu')
+        
+        # Handle different checkpoint formats
+        if 'adapter_state_dict' in checkpoint:
+            state_dict = checkpoint['adapter_state_dict']
+        elif 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+        else:
+            state_dict = checkpoint
+        
+        # Load weights
+        missing, unexpected = self.physics_adapter.load_state_dict(state_dict, strict=strict)
+        
+        if missing:
+            print(f"  Warning: Missing keys: {missing}")
+        if unexpected:
+            print(f"  Warning: Unexpected keys: {unexpected}")
+        
+        print(f"[HumanTFM] Adapter loaded successfully!")
+        
+        # Report validation loss from checkpoint if available
+        if 'val_loss' in checkpoint:
+            print(f"  Adapter reconstruction MSE: {checkpoint['val_loss']:.6f}")
+        if 'val_metrics' in checkpoint:
+            metrics = checkpoint['val_metrics']
+            if 'total_rmse' in metrics:
+                print(f"  Adapter reconstruction RMSE: {metrics['total_rmse']:.4f}")
+
