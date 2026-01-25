@@ -306,7 +306,39 @@ def main():
     # Set seed
     set_seed(config["training"].get("seed", 42))
     
-    # Setup distributed training
+    # =================================================================
+    # STAGE 0: Pre-train adapter BEFORE distributed setup
+    # This runs in single-process mode to avoid memory duplication
+    # =================================================================
+    checkpoint_dir = config["training"].get("checkpoint_dir", "./checkpoints")
+    
+    if args.pretrained_adapter:
+        adapter_path = args.pretrained_adapter
+    else:
+        adapter_path = os.path.join(checkpoint_dir, "adapter_pretrained.pt")
+    
+    # Only run pre-training if needed (before spawning multiple processes)
+    # Check LOCAL_RANK to ensure only "main" process does this
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if local_rank == 0:
+        # Check if adapter exists
+        if not os.path.exists(adapter_path):
+            print("\n[Stage 0] Adapter not found, pre-training required...")
+            # Determine device for pre-training
+            pretrain_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            adapter_path = pretrain_adapter_if_needed(
+                config=config,
+                adapter_path=adapter_path,
+                device=pretrain_device,
+                epochs=10,
+                batch_size=8,
+            )
+        else:
+            print(f"\n[Stage 0] Found existing adapter: {adapter_path}")
+    
+    # =================================================================
+    # Now setup distributed training (after Stage 0 is complete)
+    # =================================================================
     rank, world_size, device = setup_distributed()
     
     # Print banner
