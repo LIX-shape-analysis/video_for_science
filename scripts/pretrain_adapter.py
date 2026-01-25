@@ -328,15 +328,16 @@ def main():
     vae_scaling_factor = 0.18215
     
     if not args.skip_vae:
-        print("Loading Wan2.2 VAE (this may take a moment)...")
+        print("Loading Wan2.2 VAE only (not full pipeline)...")
         model_name = config.get("model", {}).get("name", "Wan-AI/Wan2.2-I2V-A14B-Diffusers")
         
-        # Load just the VAE from the pipeline
-        pipe = WanImageToVideoPipeline.from_pretrained(
+        # Load ONLY the VAE, not the full 14B pipeline
+        from diffusers.models import AutoencoderKLWan
+        vae = AutoencoderKLWan.from_pretrained(
             model_name,
+            subfolder="vae",
             torch_dtype=dtype,
-        )
-        vae = pipe.vae.to(device)
+        ).to(device)
         vae.requires_grad_(False)  # Freeze VAE
         vae.eval()
         
@@ -345,12 +346,6 @@ def main():
         
         print(f"  VAE loaded and frozen")
         print(f"  VAE scaling factor: {vae_scaling_factor}")
-        
-        # Clean up pipeline to save memory
-        del pipe.transformer
-        del pipe.text_encoder
-        del pipe
-        torch.cuda.empty_cache()
     
     # ================================================================
     # Create adapter

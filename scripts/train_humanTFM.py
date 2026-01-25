@@ -124,25 +124,23 @@ def pretrain_adapter_if_needed(
     dtype = torch.bfloat16
     
     # ================================================================
-    # Load VAE from Wan2.2 (frozen)
+    # Load ONLY the VAE (not the full 14B pipeline!)
+    # This saves ~28GB of memory
     # ================================================================
-    print("[Stage 0] Loading Wan2.2 VAE...")
+    print("[Stage 0] Loading Wan2.2 VAE only (not full pipeline)...")
     model_name = config.get("model", {}).get("name", "Wan-AI/Wan2.2-I2V-A14B-Diffusers")
     
-    from diffusers import WanImageToVideoPipeline
-    pipe = WanImageToVideoPipeline.from_pretrained(model_name, torch_dtype=dtype)
-    vae = pipe.vae.to(device)
+    from diffusers.models import AutoencoderKLWan
+    vae = AutoencoderKLWan.from_pretrained(
+        model_name,
+        subfolder="vae",
+        torch_dtype=dtype,
+    ).to(device)
     vae.requires_grad_(False)
     vae.eval()
     
     vae_scaling_factor = getattr(vae.config, 'scaling_factor', 0.18215)
     print(f"[Stage 0] VAE loaded and frozen (scaling_factor={vae_scaling_factor})")
-    
-    # Clean up pipeline to save memory
-    del pipe.transformer
-    del pipe.text_encoder
-    del pipe
-    torch.cuda.empty_cache()
     
     # ================================================================
     # Create adapter
