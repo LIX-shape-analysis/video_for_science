@@ -63,9 +63,9 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
-def is_main_process(rank: int = 0) -> bool:
-    """Check if this is the main process."""
-    return rank == 0
+def is_main_process() -> bool:
+    """Check if this is the main process (rank 0)."""
+    return get_rank() == 0
 
 
 def get_rank() -> int:
