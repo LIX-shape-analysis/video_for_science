@@ -83,6 +83,130 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
+def pretrain_adapter_if_needed(
+    config: dict,
+    adapter_path: str,
+    device: torch.device,
+    epochs: int = 10,
+    batch_size: int = 8,
+) -> str:
+    """
+    Pre-train the physics adapter if no checkpoint exists.
+    
+    This is "Stage 0" - trains the adapter as an autoencoder so it can
+    properly map between physics and video space.
+    
+    Returns:
+        Path to the (possibly newly created) adapter checkpoint.
+    """
+    import torch.nn.functional as F
+    from tqdm import tqdm
+    from src.models.physics_adapter import PhysicsAdapterPair
+    from src.data.dataset import WellDataset
+    from torch.utils.data import DataLoader
+    
+    # Check if adapter already exists
+    if os.path.exists(adapter_path):
+        print(f"\n[Stage 0] Found existing adapter: {adapter_path}")
+        return adapter_path
+    
+    print("\n" + "="*70)
+    print("  STAGE 0: Physics Adapter Pre-training")
+    print("="*70)
+    print("  Training adapter as autoencoder (encode → decode ≈ identity)")
+    print(f"  Epochs: {epochs}")
+    print(f"  Output: {adapter_path}")
+    print("="*70 + "\n")
+    
+    # Create adapter
+    adapter_config = config.get("model", {}).get("physics_adapter", {})
+    adapter = PhysicsAdapterPair(
+        physics_channels=adapter_config.get("physics_channels", 4),
+        video_channels=adapter_config.get("video_channels", 3),
+        hidden_dim=adapter_config.get("hidden_dim", 64),
+        physics_size=tuple(adapter_config.get("physics_size", [128, 384])),
+        video_size=tuple(adapter_config.get("video_size", [240, 416])),
+        use_residual=False,  # No residual for autoencoder training
+    ).to(device)
+    
+    # Create dataset
+    data_config = config.get("data", {})
+    train_dataset = WellDataset(
+        base_path=data_config.get("base_path", "./datasets/datasets"),
+        dataset_name=data_config.get("dataset_name", "turbulent_radiative_layer_2D"),
+        n_steps_input=1,
+        n_steps_output=1,
+        split="train",
+        use_normalization=False,
+    )
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        drop_last=True,
+    )
+    
+    # Optimizer
+    optimizer = torch.optim.AdamW(adapter.parameters(), lr=1e-4, weight_decay=0.01)
+    
+    best_loss = float("inf")
+    
+    for epoch in range(1, epochs + 1):
+        adapter.train()
+        total_loss = 0.0
+        
+        pbar = tqdm(train_loader, desc=f"[Stage 0] Epoch {epoch}/{epochs}")
+        for batch in pbar:
+            frames = batch["input_frames"]
+            
+            # Handle shape
+            if frames.dim() == 5:
+                frames = frames[:, 0]
+            if frames.dim() == 4 and frames.shape[-1] == 4:
+                frames = frames.permute(0, 3, 1, 2)
+            
+            frames = frames.to(device).float()
+            
+            # Forward
+            video_rep = adapter.encode(frames)
+            reconstructed = adapter.decode(video_rep)
+            
+            # Loss
+            loss = F.mse_loss(reconstructed, frames)
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+            pbar.set_postfix({"loss": f"{loss.item():.6f}"})
+        
+        avg_loss = total_loss / len(train_loader)
+        print(f"[Stage 0] Epoch {epoch} - Loss: {avg_loss:.6f}")
+        
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            # Save
+            os.makedirs(os.path.dirname(adapter_path), exist_ok=True)
+            checkpoint = {
+                "epoch": epoch,
+                "adapter_state_dict": adapter.state_dict(),
+                "val_loss": avg_loss,
+                "val_metrics": {"total_rmse": avg_loss ** 0.5},
+            }
+            torch.save(checkpoint, adapter_path)
+            print(f"  ✓ Saved best adapter (loss: {avg_loss:.6f})")
+    
+    print(f"\n[Stage 0] Complete! Adapter saved to {adapter_path}")
+    print(f"  Final reconstruction MSE: {best_loss:.6f}")
+    print(f"  Final reconstruction RMSE: {best_loss**0.5:.4f}\n")
+    
+    return adapter_path
+
+
 def create_humantfm_model(config: dict) -> HumanTFMModel:
     """Create HumanTFM model from config."""
     model_config = config.get("model", {})
@@ -216,19 +340,36 @@ def main():
     
     model = create_humantfm_model(config)
     
-    # Load pretrained adapter (CRITICAL for good results)
+    # Handle pretrained adapter (Stage 0)
+    # If no adapter specified, auto-generate path and pre-train if needed
+    checkpoint_dir = config["training"].get("checkpoint_dir", "./checkpoints")
+    
     if args.pretrained_adapter:
-        model.load_adapter(args.pretrained_adapter)
-        if rank == 0:
-            print("  ✓ Loaded pretrained adapter weights")
+        adapter_path = args.pretrained_adapter
     else:
-        if rank == 0:
-            print("\n" + "!"*70)
-            print("  WARNING: No pretrained adapter specified!")
-            print("  The decoder will be randomly initialized.")
-            print("  Use --pretrained_adapter /path/to/adapter.pt")
-            print("  Run scripts/pretrain_adapter.py first.")
-            print("!"*70 + "\n")
+        # Default path within checkpoint directory
+        adapter_path = os.path.join(checkpoint_dir, "adapter_pretrained.pt")
+    
+    # Pre-train adapter if it doesn't exist (only on rank 0)
+    if rank == 0:
+        adapter_path = pretrain_adapter_if_needed(
+            config=config,
+            adapter_path=adapter_path,
+            device=device,
+            epochs=10,
+            batch_size=8,
+        )
+    
+    # Sync across all ranks
+    if world_size > 1:
+        import torch.distributed as dist
+        # Barrier to ensure rank 0 has finished pre-training
+        dist.barrier()
+    
+    # Load the adapter weights
+    model.load_adapter(adapter_path)
+    if rank == 0:
+        print("  ✓ Loaded pretrained adapter weights")
     
     # Create trainer
     if rank == 0:
