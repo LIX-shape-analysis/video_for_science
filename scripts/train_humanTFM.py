@@ -381,33 +381,7 @@ def main():
     
     model = create_humantfm_model(config)
     
-    # Handle pretrained adapter (Stage 0)
-    # If no adapter specified, auto-generate path and pre-train if needed
-    checkpoint_dir = config["training"].get("checkpoint_dir", "./checkpoints")
-    
-    if args.pretrained_adapter:
-        adapter_path = args.pretrained_adapter
-    else:
-        # Default path within checkpoint directory
-        adapter_path = os.path.join(checkpoint_dir, "adapter_pretrained.pt")
-    
-    # Pre-train adapter if it doesn't exist (only on rank 0)
-    if rank == 0:
-        adapter_path = pretrain_adapter_if_needed(
-            config=config,
-            adapter_path=adapter_path,
-            device=device,
-            epochs=10,
-            batch_size=8,
-        )
-    
-    # Sync across all ranks
-    if world_size > 1:
-        import torch.distributed as dist
-        # Barrier to ensure rank 0 has finished pre-training
-        dist.barrier()
-    
-    # Load the adapter weights
+    # Load the pretrained adapter (Stage 0 already completed before distributed setup)
     model.load_adapter(adapter_path)
     if rank == 0:
         print("  ✓ Loaded pretrained adapter weights")
