@@ -612,19 +612,19 @@ class HumanTFMModel(nn.Module):
         # ========== VERIFICATION: Log weight statistics ==========
         print(f"[Rank {rank}] ✓ Adapter loaded! Verifying weights...")
         
-        # Encoder verification
-        enc_weight = self.physics_adapter.encoder.conv_in.weight
+        # Encoder verification (first conv in input_proj Sequential)
+        enc_weight = self.physics_adapter.encoder.input_proj[0].weight
         enc_sum = enc_weight.sum().item()
         enc_mean = enc_weight.mean().item()
         enc_std = enc_weight.std().item()
-        print(f"[Rank {rank}]   Encoder conv_in: sum={enc_sum:.4f}, mean={enc_mean:.6f}, std={enc_std:.6f}")
+        print(f"[Rank {rank}]   Encoder input_proj[0]: sum={enc_sum:.4f}, mean={enc_mean:.6f}, std={enc_std:.6f}")
         
         # Decoder verification
-        dec_weight = self.physics_adapter.decoder.conv_out.weight
+        dec_weight = self.physics_adapter.decoder.output_proj.weight
         dec_sum = dec_weight.sum().item()
         dec_mean = dec_weight.mean().item()
         dec_std = dec_weight.std().item()
-        print(f"[Rank {rank}]   Decoder conv_out: sum={dec_sum:.4f}, mean={dec_mean:.6f}, std={dec_std:.6f}")
+        print(f"[Rank {rank}]   Decoder output_proj: sum={dec_sum:.4f}, mean={dec_mean:.6f}, std={dec_std:.6f}")
         
         # Total parameter count verification
         encoder_params = sum(p.numel() for p in self.physics_adapter.encoder.parameters())
