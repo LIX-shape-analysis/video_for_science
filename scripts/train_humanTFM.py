@@ -362,8 +362,8 @@ def main():
     set_seed(config["training"].get("seed", 42))
     
     # =================================================================
-    # STAGE 0: Pre-train adapter BEFORE distributed setup
-    # This runs in single-process mode to avoid memory duplication
+    # Adapter path - MUST be pre-trained before distributed training!
+    # Run: python scripts/pretrain_adapter.py --output_path <path>
     # =================================================================
     checkpoint_dir = config["training"].get("checkpoint_dir", "./checkpoints")
     
@@ -372,24 +372,27 @@ def main():
     else:
         adapter_path = os.path.join(checkpoint_dir, "adapter_pretrained.pt")
     
-    # Only run pre-training if needed (before spawning multiple processes)
-    # Check LOCAL_RANK to ensure only "main" process does this
+    # Check that adapter exists (required before distributed training)
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    if local_rank == 0:
-        # Check if adapter exists
-        if not os.path.exists(adapter_path):
-            print("\n[Stage 0] Adapter not found, pre-training required...")
-            # Determine device for pre-training
-            pretrain_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-            adapter_path = pretrain_adapter_if_needed(
-                config=config,
-                adapter_path=adapter_path,
-                device=pretrain_device,
-                epochs=10,
-                batch_size=8,
-            )
-        else:
-            print(f"\n[Stage 0] Found existing adapter: {adapter_path}")
+    if not os.path.exists(adapter_path):
+        if local_rank == 0:
+            print("\n" + "="*70)
+            print("  ERROR: Pretrained adapter not found!")
+            print("="*70)
+            print(f"  Expected path: {adapter_path}")
+            print("")
+            print("  Stage 0 (adapter pre-training) must be run BEFORE distributed training.")
+            print("  This is because torchrun spawns multiple processes that would race.")
+            print("")
+            print("  Please run:")
+            print(f"    python scripts/pretrain_adapter.py \\")
+            print(f"        --config {args.config} \\")
+            print(f"        --output_path {adapter_path} \\")
+            print(f"        --epochs 20")
+            print("")
+            print("  Then re-run this script.")
+            print("="*70 + "\n")
+        sys.exit(1)
     
     # =================================================================
     # Now setup distributed training (after Stage 0 is complete)
