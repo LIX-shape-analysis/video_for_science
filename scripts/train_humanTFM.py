@@ -102,7 +102,7 @@ def pretrain_adapter_if_needed(
     import torch.nn.functional as F
     from tqdm import tqdm
     from src.models.physics_adapter import PhysicsAdapterPair
-    from src.data.dataset import WellDataset
+    from src.data.dataset import WellVideoDataset
     from torch.utils.data import DataLoader
     
     # Check if adapter already exists
@@ -131,7 +131,7 @@ def pretrain_adapter_if_needed(
     
     # Create dataset
     data_config = config.get("data", {})
-    train_dataset = WellDataset(
+    train_dataset = WellVideoDataset(
         base_path=data_config.get("base_path", "./datasets/datasets"),
         dataset_name=data_config.get("dataset_name", "turbulent_radiative_layer_2D"),
         n_steps_input=1,

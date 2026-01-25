@@ -29,7 +29,7 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.models.physics_adapter import PhysicsAdapterPair
-from src.data.dataset import WellDataset
+from src.data.dataset import WellVideoDataset
 
 
 def parse_args():
@@ -53,7 +53,7 @@ def create_dataloader(config: dict, split: str, batch_size: int, num_workers: in
     """Create dataloader for adapter pre-training."""
     data_config = config.get("data", {})
     
-    dataset = WellDataset(
+    dataset = WellVideoDataset(
         base_path=data_config.get("base_path", "./datasets/datasets"),
         dataset_name=data_config.get("dataset_name", "turbulent_radiative_layer_2D"),
         n_steps_input=1,  # Only need single frames for autoencoder
